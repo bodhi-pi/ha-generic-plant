@@ -9,6 +9,7 @@ CONF_PUMP_SWITCH = "pump_switch"
 OPT_THRESHOLD = "threshold"
 OPT_PUMP_DURATION_S = "pump_duration_s"
 OPT_COOLDOWN_MIN = "cooldown_min"
+OPT_LAST_WATERED = "last_watered"
 
 # Defaults
 DEFAULT_THRESHOLD = 35.0
