@@ -6,7 +6,8 @@ from homeassistant.core import HomeAssistant
 from .const import DOMAIN
 
 # PLATFORMS: list[str] = ["sensor", "switch"]
-PLATFORMS: list[str] = ["sensor"]
+# PLATFORMS: list[str] = ["sensor"]
+PLATFORMS: list[str] = ["sensor", "number"]
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
