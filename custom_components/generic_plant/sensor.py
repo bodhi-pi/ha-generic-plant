@@ -18,8 +18,8 @@ from .const import (
     CONF_PLANT_NAME,
     CONF_MOISTURE_ENTITY,
     OPT_LAST_WATERED,
-    OPT_HEARTBEAT_TOPIC,
     OPT_LAST_SEEN,
+    OPT_HEARTBEAT_TOPIC,
 )
 
 
@@ -34,6 +34,7 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
+    """Set up plant sensors for a config entry."""
     plant_name: str = entry.data[CONF_PLANT_NAME]
     moisture_entity_id: str = entry.data[CONF_MOISTURE_ENTITY]
 
@@ -50,6 +51,8 @@ async def async_setup_entry(
 
 
 class _BasePlantSensor(SensorEntity):
+    """Base entity that attaches to the per-plant device."""
+
     _attr_has_entity_name = True
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry, runtime: PlantRuntime) -> None:
@@ -57,6 +60,7 @@ class _BasePlantSensor(SensorEntity):
         self.entry = entry
         self.runtime = runtime
 
+        # One device per plant (stable device identity per config entry)
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
             name=runtime.plant_name,
@@ -66,7 +70,10 @@ class _BasePlantSensor(SensorEntity):
 
 
 class PlantMoistureProxy(_BasePlantSensor):
-    """Proxy moisture sensor that belongs to the plant device."""
+    """Proxy moisture sensor that belongs to the plant device.
+
+    Mirrors the selected HA sensor entity, but groups it under the plant device.
+    """
 
     _attr_device_class = SensorDeviceClass.MOISTURE
     _attr_native_unit_of_measurement = PERCENTAGE
@@ -83,6 +90,7 @@ class PlantMoistureProxy(_BasePlantSensor):
     async def async_added_to_hass(self) -> None:
         self._sync_from_source()
 
+        # Subscribe to *entity* changes (works for any sensor integration)
         self._unsub = async_track_state_change_event(
             self.hass,
             [self.runtime.moisture_entity_id],
@@ -105,10 +113,10 @@ class PlantMoistureProxy(_BasePlantSensor):
             self._native_value = None
 
     async def _handle_source_event(self, event) -> None:
-        # Mirror the moisture value
+        """Update moisture proxy and stamp last_seen when the *entity* changes."""
         self._sync_from_source()
 
-        # Update last_seen when the entity changes (works for non-MQTT sensors too)
+        # This will only fire when HA sees a state-change event for the entity
         now_iso = datetime.now(timezone.utc).isoformat()
         self.hass.config_entries.async_update_entry(
             self.entry,
@@ -149,7 +157,11 @@ class PlantLastWateredSensor(_BasePlantSensor):
 
 
 class PlantLastSeenSensor(_BasePlantSensor):
-    """Last time we received a reading event (entity change or MQTT heartbeat)."""
+    """Last time we received a reading event.
+
+    - Updates on entity change events (generic)
+    - If heartbeat_topic is configured, also updates on every MQTT message (works for repeated values)
+    """
 
     _attr_device_class = SensorDeviceClass.TIMESTAMP
     _attr_icon = "mdi:clock-check"
@@ -159,9 +171,18 @@ class PlantLastSeenSensor(_BasePlantSensor):
         self._attr_name = "Last Seen"
         self._attr_unique_id = f"{entry.entry_id}_last_seen"
         self._unsub_mqtt = None
+        self._last_seen_dt: datetime | None = None
 
     async def async_added_to_hass(self) -> None:
-        # Subscribe to optional heartbeat topic (if provided)
+        # Load persisted value (if any)
+        raw = self.entry.options.get(OPT_LAST_SEEN)
+        if raw:
+            try:
+                self._last_seen_dt = datetime.fromisoformat(raw)
+            except Exception:
+                self._last_seen_dt = None
+
+        # Subscribe to optional MQTT heartbeat topic (if provided)
         topic = (self.entry.options.get(OPT_HEARTBEAT_TOPIC) or "").strip()
         if topic:
             self._unsub_mqtt = await async_subscribe(self.hass, topic, self._on_mqtt)
@@ -172,23 +193,24 @@ class PlantLastSeenSensor(_BasePlantSensor):
             self._unsub_mqtt = None
 
     def _touch(self) -> None:
-        now_iso = datetime.now(timezone.utc).isoformat()
+        """Update runtime + persist to options + publish state."""
+        self._last_seen_dt = datetime.now(timezone.utc)
+        now_iso = self._last_seen_dt.isoformat()
+
+        # Persist so it survives restarts
         self.hass.config_entries.async_update_entry(
             self.entry,
             options={**self.entry.options, OPT_LAST_SEEN: now_iso},
         )
+
+        # Update entity immediately
         self.async_write_ha_state()
 
     async def _on_mqtt(self, msg) -> None:
-        # Any message counts as “fresh” regardless of payload repeating
+        # Any message counts as fresh, even if payload repeats
         self._touch()
 
     @property
     def native_value(self) -> datetime | None:
-        raw = self.entry.options.get(OPT_LAST_SEEN)
-        if not raw:
-            return None
-        try:
-            return datetime.fromisoformat(raw)
-        except Exception:
-            return None
+        # Prefer runtime value; fallback to stored option if runtime not set yet
+        return self._last_seen_dt
