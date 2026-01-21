@@ -5,8 +5,8 @@ from homeassistant.core import HomeAssistant
 
 from .const import DOMAIN
 
-PLATFORMS: list[str] = ["sensor", "number"]
-
+#PLATFORMS: list[str] = ["sensor", "number"]
+PLATFORMS: list[str] = ["sensor", "number", "button"]
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Set up the integration from YAML (not used)."""
