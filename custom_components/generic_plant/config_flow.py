@@ -145,6 +145,10 @@ class GenericPlantOptionsFlow(config_entries.OptionsFlow):
         if not current_topic:
             current_topic = _suggest_heartbeat_from_entity(self.hass, self.entry.data[CONF_MOISTURE_ENTITY])
 
+
+
+
+
         if user_input is not None:
             topic = (user_input.get(OPT_HEARTBEAT_TOPIC) or "").strip()
             notify_service = (user_input.get(OPT_NOTIFY_SERVICE) or "").strip()
@@ -153,14 +157,15 @@ class GenericPlantOptionsFlow(config_entries.OptionsFlow):
             if not notify_service:
                 notify_on_water = False
 
-            return self.async_create_entry(
-                title="",
-                data={
-                    OPT_HEARTBEAT_TOPIC: topic,
-                    OPT_NOTIFY_SERVICE: notify_service,
-                    OPT_NOTIFY_ON_WATER: notify_on_water,
-                },
-            )
+            new_options = {
+                **self.entry.options,  # keep everything we already had
+                OPT_HEARTBEAT_TOPIC: topic,
+                OPT_NOTIFY_SERVICE: notify_service,
+                OPT_NOTIFY_ON_WATER: notify_on_water,
+            }
+
+            return self.async_create_entry(title="", data=new_options)
+
 
         schema = vol.Schema(
             {
