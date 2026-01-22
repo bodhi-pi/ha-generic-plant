@@ -27,7 +27,10 @@ async def async_setup_entry(
 
 
 class PlantStaleBinarySensor(BinarySensorEntity):
-    """True if last_seen is older than stale_after minutes."""
+    """True if last_seen is older than stale_after minutes.
+
+    IMPORTANT: this re-evaluates on a timer so it can flip to stale even if no entity updates occur.
+    """
 
     _attr_has_entity_name = True
     _attr_name = "Stale"
@@ -49,8 +52,12 @@ class PlantStaleBinarySensor(BinarySensorEntity):
         self._unsub_timer = None
 
     async def async_added_to_hass(self) -> None:
-        # Refresh periodically so the stale state flips even if nothing else changes
-        self._unsub_timer = async_track_time_interval(self.hass, self._tick, timedelta(minutes=1))
+        # Re-check staleness periodically so it can transition based on time alone.
+        self._unsub_timer = async_track_time_interval(
+            self.hass,
+            self._tick,
+            timedelta(seconds=30),
+        )
 
     async def async_will_remove_from_hass(self) -> None:
         if self._unsub_timer:
@@ -58,11 +65,12 @@ class PlantStaleBinarySensor(BinarySensorEntity):
             self._unsub_timer = None
 
     async def _tick(self, now) -> None:
+        # Trigger HA to re-read is_on
         self.async_write_ha_state()
 
     @property
     def is_on(self) -> bool:
-        # Missing last_seen -> stale (safe)
+        # Missing last_seen -> stale (safe default)
         raw = self.entry.options.get(OPT_LAST_SEEN)
         if not raw:
             return True
