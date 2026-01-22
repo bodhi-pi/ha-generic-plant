@@ -16,8 +16,12 @@ from .const import (
     OPT_PUMP_DURATION_S,
     OPT_LAST_WATERED,
     DEFAULT_PUMP_DURATION_S,
+    OPT_NOTIFY_SERVICE,
+    OPT_NOTIFY_ON_WATER,
 )
 from .engine import PlantEngine
+
+from .notify_util import send_notify
 
 
 async def async_setup_entry(
@@ -82,6 +86,16 @@ class PlantWaterNowButton(_BasePlantButton):
                 self.entry,
                 options={**self.entry.options, OPT_LAST_WATERED: now_iso},
             )
+
+            await send_notify(
+                self.hass,
+                self.entry,
+                title=f"🌱 {self.plant_name} watered",
+                message=f"Manual watering ran for {duration_s}s.",
+                option_notify_service_key=OPT_NOTIFY_SERVICE,
+                option_notify_enabled_key=OPT_NOTIFY_ON_WATER,
+            )
+
 
         # 4) Run for duration, then OFF
         await asyncio.sleep(max(1, int(duration_s)))

@@ -1,0 +1,8 @@
+{
+  "name": "Generic Plant",
+  "content_in_root": false,
+  "domain": "generic_plant",
+  "documentation": "https://github.com/bodhi-pi/ha-generic-plant",
+  "iot_class": "local_polling",
+  "render_readme": true
+}

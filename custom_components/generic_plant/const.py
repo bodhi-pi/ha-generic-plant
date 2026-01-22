@@ -14,6 +14,16 @@ OPT_AUTO_WATER = "auto_water"
 OPT_NOTIFY_SERVICE = "notify_service"     # e.g. "notify.mobile_app_teds_ipad"
 OPT_NOTIFY_ON_WATER = "notify_on_water"   # bool
 OPT_STALE_AFTER_MIN = "stale_after_min"
+OPT_NOTIFY_ON_FAILURE = "notify_on_failure"    # bool
+OPT_NOTIFY_ON_STALE = "notify_on_stale"        # bool
+
+# Notification throttles (store last time we notified so we don't spam)
+OPT_LAST_STALE_NOTIFY = "last_stale_notify"
+OPT_LAST_FAILURE_NOTIFY = "last_failure_notify"
+
+# Diagnostics (persisted)
+OPT_LAST_EVALUATED = "last_evaluated"
+OPT_LAST_DECISION = "last_decision"
 
 # Defaults
 DEFAULT_THRESHOLD = 35.0
@@ -24,3 +34,5 @@ DEFAULT_STALE_AFTER_MIN = 120
 # NEW: optional MQTT heartbeat topic + last_seen timestamp
 OPT_HEARTBEAT_TOPIC = "heartbeat_topic"
 OPT_LAST_SEEN = "last_seen"
+
+
