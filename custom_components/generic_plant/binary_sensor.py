@@ -69,16 +69,22 @@ class PlantStaleBinarySensor(BinarySensorEntity):
         self.async_write_ha_state()
 
     @property
+    def available(self) -> bool:
+        # Don’t claim we can judge staleness until we’ve seen at least one timestamp
+        raw = self.entry.options.get(OPT_LAST_SEEN)
+        return bool(raw)
+
+    @property
     def is_on(self) -> bool:
-        # Missing last_seen -> stale (safe default)
         raw = self.entry.options.get(OPT_LAST_SEEN)
         if not raw:
-            return True
+            # If we have no data yet, we’re “unavailable” (see available()) not “problem”
+            return False
 
         try:
             last_seen = datetime.fromisoformat(raw)
         except Exception:
-            return True
+            return True  # malformed timestamp -> treat as stale
 
         stale_after = int(self.entry.options.get(OPT_STALE_AFTER_MIN, DEFAULT_STALE_AFTER_MIN))
         return (datetime.now(timezone.utc) - last_seen) > timedelta(minutes=stale_after)
