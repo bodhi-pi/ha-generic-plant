@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 
 from homeassistant.components.button import ButtonEntity
@@ -16,6 +17,7 @@ from .const import (
     OPT_LAST_WATERED,
     DEFAULT_PUMP_DURATION_S,
 )
+from .engine import PlantEngine
 
 
 async def async_setup_entry(
@@ -23,23 +25,23 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    async_add_entities([PlantWaterNowButton(hass, entry)], update_before_add=True)
+    async_add_entities(
+        [
+            PlantWaterNowButton(hass, entry),
+            PlantEvaluateNowButton(hass, entry),
+        ],
+        update_before_add=True,
+    )
 
 
-class PlantWaterNowButton(ButtonEntity):
-    """Manual watering trigger."""
-
+class _BasePlantButton(ButtonEntity):
     _attr_has_entity_name = True
-    _attr_name = "Water Now"
-    _attr_icon = "mdi:watering-can"
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self.hass = hass
         self.entry = entry
         self.plant_name = entry.data[CONF_PLANT_NAME]
-        self.pump_switch = entry.data[CONF_PUMP_SWITCH]
 
-        self._attr_unique_id = f"{entry.entry_id}_water_now"
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
             name=self.plant_name,
@@ -47,8 +49,19 @@ class PlantWaterNowButton(ButtonEntity):
             model="Plant Device",
         )
 
+
+class PlantWaterNowButton(_BasePlantButton):
+    """Manual watering trigger (always runs pump for duration; confirms ON before stamping last_watered)."""
+
+    _attr_name = "Water Now"
+    _attr_icon = "mdi:watering-can"
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        super().__init__(hass, entry)
+        self.pump_switch = entry.data[CONF_PUMP_SWITCH]
+        self._attr_unique_id = f"{entry.entry_id}_water_now"
+
     async def async_press(self) -> None:
-        """Turn pump on, confirm, set last watered, wait duration, turn off."""
         duration_s = int(self.entry.options.get(OPT_PUMP_DURATION_S, DEFAULT_PUMP_DURATION_S))
 
         # 1) Turn pump on
@@ -62,7 +75,7 @@ class PlantWaterNowButton(ButtonEntity):
         # 2) Confirm ON (up to 5s)
         confirmed = await self._wait_for_state(self.pump_switch, "on", timeout_s=5)
 
-        # 3) If confirmed, record last watered in entry.options (ISO timestamp)
+        # 3) If confirmed, record last watered
         if confirmed:
             now_iso = datetime.now(timezone.utc).isoformat()
             self.hass.config_entries.async_update_entry(
@@ -71,20 +84,7 @@ class PlantWaterNowButton(ButtonEntity):
             )
 
         # 4) Run for duration, then OFF
-        await self.hass.async_add_executor_job(lambda: None)  # yield
-        await self.hass.async_add_executor_job(lambda: None)  # tiny yield, keeps HA responsive
-        await self.hass.async_add_executor_job(lambda: None)
-
-        await self.hass.async_add_executor_job(lambda: None)
-        await self.hass.async_add_executor_job(lambda: None)
-
-        # Use HA async sleep
-        await self.hass.async_add_executor_job(lambda: None)
-        await self.hass.async_add_executor_job(lambda: None)
-
-        # Proper async sleep
-        import asyncio
-        await asyncio.sleep(duration_s)
+        await asyncio.sleep(max(1, int(duration_s)))
 
         await self.hass.services.async_call(
             "switch",
@@ -94,10 +94,6 @@ class PlantWaterNowButton(ButtonEntity):
         )
 
     async def _wait_for_state(self, entity_id: str, desired: str, timeout_s: int) -> bool:
-        """Wait for HA state to equal desired."""
-        import asyncio
-
-        # Fast path
         st = self.hass.states.get(entity_id)
         if st and st.state == desired:
             return True
@@ -109,3 +105,24 @@ class PlantWaterNowButton(ButtonEntity):
             if st and st.state == desired:
                 return True
         return False
+
+
+class PlantEvaluateNowButton(_BasePlantButton):
+    """Runs the engine evaluation immediately (no waiting for the timer)."""
+
+    _attr_name = "Evaluate Now"
+    _attr_icon = "mdi:play-circle-outline"
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        super().__init__(hass, entry)
+        self._attr_unique_id = f"{entry.entry_id}_evaluate_now"
+
+    async def async_press(self) -> None:
+        # Engine is stored in hass.data by __init__.py
+        engine = self.hass.data.get(DOMAIN, {}).get(self.entry.entry_id)
+
+        if isinstance(engine, PlantEngine):
+            await engine.evaluate_and_water()
+        else:
+            # If engine isn't found (shouldn't happen), do nothing gracefully.
+            return
