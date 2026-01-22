@@ -21,6 +21,8 @@ from .const import (
     OPT_LAST_SEEN,
     OPT_HEARTBEAT_TOPIC,
     OPT_LAST_STALE_NOTIFY,
+    OPT_LAST_EVALUATED,
+    OPT_LAST_DECISION,
 )
 
 
@@ -37,7 +39,6 @@ async def async_setup_entry(
 ) -> None:
     plant_name: str = entry.data[CONF_PLANT_NAME]
     moisture_entity_id: str = entry.data[CONF_MOISTURE_ENTITY]
-
     runtime = PlantRuntime(plant_name=plant_name, moisture_entity_id=moisture_entity_id)
 
     async_add_entities(
@@ -45,6 +46,8 @@ async def async_setup_entry(
             PlantMoistureProxy(hass, entry, runtime),
             PlantLastSeenSensor(hass, entry, runtime),
             PlantLastWateredSensor(hass, entry, runtime),
+            PlantLastEvaluatedSensor(hass, entry, runtime),
+            PlantLastDecisionSensor(hass, entry, runtime),
         ],
         update_before_add=True,
     )
@@ -216,3 +219,41 @@ class PlantLastSeenSensor(_BasePlantSensor):
     @property
     def native_value(self) -> datetime | None:
         return self._last_seen_dt
+
+
+class PlantLastEvaluatedSensor(_BasePlantSensor):
+    """Timestamp of the last engine evaluation (stored in entry.options)."""
+
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+    _attr_icon = "mdi:clock-outline"
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, runtime: PlantRuntime) -> None:
+        super().__init__(hass, entry, runtime)
+        self._attr_name = "Last Evaluated"
+        self._attr_unique_id = f"{entry.entry_id}_last_evaluated"
+
+    @property
+    def native_value(self) -> datetime | None:
+        raw = self.entry.options.get(OPT_LAST_EVALUATED)
+        if not raw:
+            return None
+        try:
+            return datetime.fromisoformat(raw)
+        except Exception:
+            return None
+
+
+class PlantLastDecisionSensor(_BasePlantSensor):
+    """Human-readable reason for last engine decision (stored in entry.options)."""
+
+    _attr_icon = "mdi:information-outline"
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, runtime: PlantRuntime) -> None:
+        super().__init__(hass, entry, runtime)
+        self._attr_name = "Last Decision"
+        self._attr_unique_id = f"{entry.entry_id}_last_decision"
+
+    @property
+    def native_value(self) -> str | None:
+        raw = self.entry.options.get(OPT_LAST_DECISION)
+        return str(raw) if raw else None
