@@ -15,6 +15,8 @@ from .const import (
     OPT_HEARTBEAT_TOPIC,
     OPT_NOTIFY_SERVICE,
     OPT_NOTIFY_ON_WATER,
+    OPT_NOTIFY_ON_STALE,
+    OPT_NOTIFY_ON_FAILURE,
 )
 
 # ecowitt2mqtt discovery often yields unique_id like:
@@ -23,7 +25,7 @@ ECOWITT_UNIQUE_ID_RE = re.compile(r"^([0-9A-Fa-f]{32})_(.+)$")
 
 
 def _notify_choices(hass: HomeAssistant) -> list[str]:
-    """Return list of notify service strings like ['','notify.mobile_app_x', ...]."""
+    """Return list of notify service strings like ['', 'notify.mobile_app_x', ...]."""
     choices = [""]
     notify_services = hass.services.async_services().get("notify", {})
     for svc_name in sorted(notify_services.keys()):
@@ -49,13 +51,15 @@ def _suggest_heartbeat_from_entity(hass: HomeAssistant, moisture_entity_id: str)
 
 
 class GenericPlantConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
+    """Initial config flow (one plant = one entry)."""
+
     VERSION = 1
 
     def __init__(self) -> None:
         self._draft: dict = {}
 
     async def async_step_user(self, user_input=None):
-        """Initial setup: name + moisture entity + pump switch."""
+        """Step 1: plant name + moisture entity + pump switch."""
         errors = {}
 
         if user_input is not None:
@@ -85,17 +89,24 @@ class GenericPlantConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(step_id="user", data_schema=schema, errors=errors)
 
     async def async_step_options(self, user_input=None):
-        """Initial optional step: heartbeat + notifications."""
+        """Step 2 (optional): heartbeat topic + notifications."""
         notify_choices = _notify_choices(self.hass)
         suggested_topic = _suggest_heartbeat_from_entity(self.hass, self._draft[CONF_MOISTURE_ENTITY])
 
         if user_input is not None:
             topic = (user_input.get(OPT_HEARTBEAT_TOPIC) or "").strip()
             notify_service = (user_input.get(OPT_NOTIFY_SERVICE) or "").strip()
-            notify_on_water = bool(user_input.get(OPT_NOTIFY_ON_WATER, True))
 
+            # Default toggles:
+            notify_on_water = bool(user_input.get(OPT_NOTIFY_ON_WATER, True))
+            notify_on_stale = bool(user_input.get(OPT_NOTIFY_ON_STALE, False))
+            notify_on_failure = bool(user_input.get(OPT_NOTIFY_ON_FAILURE, False))
+
+            # If no notify service selected, disable all notification toggles
             if not notify_service:
                 notify_on_water = False
+                notify_on_stale = False
+                notify_on_failure = False
 
             return self.async_create_entry(
                 title=self._draft[CONF_PLANT_NAME],
@@ -108,6 +119,8 @@ class GenericPlantConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     OPT_HEARTBEAT_TOPIC: topic,
                     OPT_NOTIFY_SERVICE: notify_service,
                     OPT_NOTIFY_ON_WATER: notify_on_water,
+                    OPT_NOTIFY_ON_STALE: notify_on_stale,
+                    OPT_NOTIFY_ON_FAILURE: notify_on_failure,
                 },
             )
 
@@ -115,7 +128,11 @@ class GenericPlantConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             {
                 vol.Optional(OPT_HEARTBEAT_TOPIC, default=suggested_topic): str,
                 vol.Optional(OPT_NOTIFY_SERVICE, default=""): vol.In(notify_choices),
+
+                # Notification toggles (only meaningful if a notify service is selected)
                 vol.Optional(OPT_NOTIFY_ON_WATER, default=True): bool,
+                vol.Optional(OPT_NOTIFY_ON_STALE, default=False): bool,
+                vol.Optional(OPT_NOTIFY_ON_FAILURE, default=False): bool,
             }
         )
 
@@ -128,7 +145,7 @@ class GenericPlantConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class GenericPlantOptionsFlow(config_entries.OptionsFlow):
-    """Options flow: edits entry.options in place."""
+    """Reconfigure entry.options in place (never delete/re-add)."""
 
     def __init__(self, entry: config_entries.ConfigEntry) -> None:
         self.entry = entry
@@ -140,38 +157,46 @@ class GenericPlantOptionsFlow(config_entries.OptionsFlow):
         current_topic = (self.entry.options.get(OPT_HEARTBEAT_TOPIC) or "").strip()
         current_notify_service = (self.entry.options.get(OPT_NOTIFY_SERVICE) or "").strip()
         current_notify_on_water = bool(self.entry.options.get(OPT_NOTIFY_ON_WATER, False))
+        current_notify_on_stale = bool(self.entry.options.get(OPT_NOTIFY_ON_STALE, False))
+        current_notify_on_failure = bool(self.entry.options.get(OPT_NOTIFY_ON_FAILURE, False))
 
-        # Best-effort suggestion (only if current is blank)
+        # Auto-suggest heartbeat topic only if blank
         if not current_topic:
             current_topic = _suggest_heartbeat_from_entity(self.hass, self.entry.data[CONF_MOISTURE_ENTITY])
-
-
-
-
 
         if user_input is not None:
             topic = (user_input.get(OPT_HEARTBEAT_TOPIC) or "").strip()
             notify_service = (user_input.get(OPT_NOTIFY_SERVICE) or "").strip()
+
             notify_on_water = bool(user_input.get(OPT_NOTIFY_ON_WATER, True))
+            notify_on_stale = bool(user_input.get(OPT_NOTIFY_ON_STALE, False))
+            notify_on_failure = bool(user_input.get(OPT_NOTIFY_ON_FAILURE, False))
 
             if not notify_service:
                 notify_on_water = False
+                notify_on_stale = False
+                notify_on_failure = False
 
+            # ✅ IMPORTANT: merge (do not overwrite) so we don't wipe last_watered, thresholds, etc.
             new_options = {
-                **self.entry.options,  # keep everything we already had
+                **self.entry.options,
                 OPT_HEARTBEAT_TOPIC: topic,
                 OPT_NOTIFY_SERVICE: notify_service,
                 OPT_NOTIFY_ON_WATER: notify_on_water,
+                OPT_NOTIFY_ON_STALE: notify_on_stale,
+                OPT_NOTIFY_ON_FAILURE: notify_on_failure,
             }
 
             return self.async_create_entry(title="", data=new_options)
-
 
         schema = vol.Schema(
             {
                 vol.Optional(OPT_HEARTBEAT_TOPIC, default=current_topic): str,
                 vol.Optional(OPT_NOTIFY_SERVICE, default=current_notify_service): vol.In(notify_choices),
+
                 vol.Optional(OPT_NOTIFY_ON_WATER, default=current_notify_on_water): bool,
+                vol.Optional(OPT_NOTIFY_ON_STALE, default=current_notify_on_stale): bool,
+                vol.Optional(OPT_NOTIFY_ON_FAILURE, default=current_notify_on_failure): bool,
             }
         )
 
