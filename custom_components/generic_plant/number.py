@@ -13,11 +13,12 @@ from .const import (
     OPT_THRESHOLD,
     OPT_PUMP_DURATION_S,
     OPT_COOLDOWN_MIN,
+    OPT_STALE_AFTER_MIN,
     DEFAULT_THRESHOLD,
     DEFAULT_PUMP_DURATION_S,
     DEFAULT_COOLDOWN_MIN,
+    DEFAULT_STALE_AFTER_MIN,
 )
-
 
 async def async_setup_entry(
     hass: HomeAssistant,
