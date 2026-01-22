@@ -66,50 +66,53 @@ class PlantWaterNowButton(_BasePlantButton):
         self._attr_unique_id = f"{entry.entry_id}_water_now"
 
     async def async_press(self) -> None:
-        # ✅ Read current pump switch at press time (so options changes take effect immediately)
+        # Always resolve the current pump switch at press time (options changes apply immediately)
         pump_switch = cfg(self.entry, CONF_PUMP_SWITCH)
         if not pump_switch:
             return
 
         duration_s = int(self.entry.options.get(OPT_PUMP_DURATION_S, DEFAULT_PUMP_DURATION_S))
 
-        # 1) Turn pump on
-        await self.hass.services.async_call(
-            "switch",
-            "turn_on",
-            {"entity_id": pump_switch},
-            blocking=True,
-        )
-
-        # 2) Confirm ON (up to 5s)
-        confirmed = await self._wait_for_state(pump_switch, "on", timeout_s=5)
-
-        # 3) If confirmed, record last watered + notify (your existing logic)
-        if confirmed:
-            now_iso = datetime.now(timezone.utc).isoformat()
-            self.hass.config_entries.async_update_entry(
-                self.entry,
-                options={**self.entry.options, OPT_LAST_WATERED: now_iso},
+        try:
+            # 1) Turn pump on
+            await self.hass.services.async_call(
+                "switch",
+                "turn_on",
+                {"entity_id": pump_switch},
+                blocking=True,
             )
 
-            await send_notify(
-                self.hass,
-                self.entry,
-                title=f"🌱 {self.plant_name} watered",
-                message=f"Manual watering ran for {duration_s}s.",
-                option_notify_service_key=OPT_NOTIFY_SERVICE,
-                option_notify_enabled_key=OPT_NOTIFY_ON_WATER,
+            # 2) Confirm ON (up to 5s)
+            confirmed = await self._wait_for_state(pump_switch, "on", timeout_s=5)
+
+            # 3) If confirmed, record last watered + notify
+            if confirmed:
+                now_iso = datetime.now(timezone.utc).isoformat()
+                self.hass.config_entries.async_update_entry(
+                    self.entry,
+                    options={**self.entry.options, OPT_LAST_WATERED: now_iso},
+                )
+
+                await send_notify(
+                    self.hass,
+                    self.entry,
+                    title=f"🌱 {self.plant_name} watered",
+                    message=f"Manual watering ran for {duration_s}s.",
+                    option_notify_service_key=OPT_NOTIFY_SERVICE,
+                    option_notify_enabled_key=OPT_NOTIFY_ON_WATER,
+                )
+
+            # 4) Keep pump on for duration (even if confirm failed)
+            await asyncio.sleep(max(1, int(duration_s)))
+
+        finally:
+            # 5) ALWAYS turn the pump off (prevents “stuck on” even if something errors above)
+            await self.hass.services.async_call(
+                "switch",
+                "turn_off",
+                {"entity_id": pump_switch},
+                blocking=True,
             )
-
-        # 4) Run for duration, then OFF
-        await asyncio.sleep(max(1, int(duration_s)))
-
-        await self.hass.services.async_call(
-            "switch",
-            "turn_off",
-            {"entity_id": pump_switch},
-            blocking=True,
-        )
 
 
 class PlantEvaluateNowButton(_BasePlantButton):
