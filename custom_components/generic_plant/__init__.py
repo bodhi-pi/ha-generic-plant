@@ -9,8 +9,7 @@ from homeassistant.core import HomeAssistant
 from .const import DOMAIN
 from .engine import PlantEngine
 
-PLATFORMS: list[str] = ["sensor", "number", "button", "switch"]
-
+PLATFORMS: list[str] = ["sensor", "number", "button", "switch", "binary_sensor"]
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     return True
