@@ -133,7 +133,8 @@ class PlantStaleAfterNumber(_BasePlantNumber):
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         super().__init__(hass, entry)
-        self._attr_unique_id = f"{entry.entry_id}_stale_after_min"
+        # ✅ Keep this stable so HA doesn't orphan the entity in the registry
+        self._attr_unique_id = f"{entry.entry_id}_stale_after"
 
     @property
     def native_value(self) -> float:
