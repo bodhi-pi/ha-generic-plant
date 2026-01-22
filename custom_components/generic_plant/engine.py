@@ -16,9 +16,12 @@ from .const import (
     OPT_PUMP_DURATION_S,
     OPT_COOLDOWN_MIN,
     OPT_LAST_WATERED,
+    OPT_LAST_SEEN,
+    OPT_STALE_AFTER_MIN,
     DEFAULT_THRESHOLD,
     DEFAULT_PUMP_DURATION_S,
     DEFAULT_COOLDOWN_MIN,
+    DEFAULT_STALE_AFTER_MIN,
 )
 
 
@@ -74,6 +77,9 @@ class PlantEngine:
             return True
         return (datetime.now(timezone.utc) - last) > timedelta(minutes=cd_min)
 
+    # ---------------------------
+    # Freshness / staleness guard
+    # ---------------------------
     def _get_last_seen(self) -> datetime | None:
         raw = self.entry.options.get(OPT_LAST_SEEN)
         if not raw:
@@ -83,13 +89,14 @@ class PlantEngine:
         except Exception:
             return None
 
-    def _is_stale(self) -> bool:
+    def _is_fresh_enough(self) -> bool:
+        """True only when we have a recent reading (prevents watering on stale/unknown data)."""
         last_seen = self._get_last_seen()
         if last_seen is None:
-            return True  # safe default
+            return False  # unknown -> unsafe
 
         stale_after = int(self.entry.options.get(OPT_STALE_AFTER_MIN, DEFAULT_STALE_AFTER_MIN))
-        return (datetime.now(timezone.utc) - last_seen) > timedelta(minutes=stale_after)
+        return (datetime.now(timezone.utc) - last_seen) <= timedelta(minutes=stale_after)
 
     async def _tick(self, now) -> None:
         # Prevent overlapping runs
@@ -98,10 +105,12 @@ class PlantEngine:
 
     async def evaluate_and_water(self) -> WaterResult:
         """Evaluate conditions and water if needed."""
+        # Auto mode must be enabled
         if not self.entry.options.get(OPT_AUTO_WATER, False):
             return WaterResult(ran=False, confirmed_on=False)
 
-        if self._is_stale():
+        # Sensor must be fresh (not stale/unavailable)
+        if not self._is_fresh_enough():
             return WaterResult(ran=False, confirmed_on=False)
 
         moisture_entity = self.entry.data[CONF_MOISTURE_ENTITY]
