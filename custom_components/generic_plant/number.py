@@ -29,6 +29,7 @@ async def async_setup_entry(
             PlantThresholdNumber(hass, entry),
             PlantPumpDurationNumber(hass, entry),
             PlantCooldownNumber(hass, entry),
+            PlantStaleAfterNumber(hass, entry),   # <-- add this
         ],
         update_before_add=True,
     )
@@ -121,3 +122,22 @@ class PlantCooldownNumber(_BasePlantNumber):
 
     async def async_set_native_value(self, value: float) -> None:
         await self._set_opt(OPT_COOLDOWN_MIN, value)
+
+class PlantStaleAfterNumber(_BasePlantNumber):
+    _attr_name = "Stale After"
+    _attr_icon = "mdi:timer-alert"
+    _attr_native_unit_of_measurement = "min"
+    _attr_native_min_value = 1.0
+    _attr_native_max_value = 1440.0
+    _attr_native_step = 5.0
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        super().__init__(hass, entry)
+        self._attr_unique_id = f"{entry.entry_id}_stale_after_min"
+
+    @property
+    def native_value(self) -> float:
+        return self._get_opt(OPT_STALE_AFTER_MIN, DEFAULT_STALE_AFTER_MIN)
+
+    async def async_set_native_value(self, value: float) -> None:
+        await self._set_opt(OPT_STALE_AFTER_MIN, value)
