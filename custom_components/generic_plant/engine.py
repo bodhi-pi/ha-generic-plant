@@ -74,6 +74,23 @@ class PlantEngine:
             return True
         return (datetime.now(timezone.utc) - last) > timedelta(minutes=cd_min)
 
+    def _get_last_seen(self) -> datetime | None:
+        raw = self.entry.options.get(OPT_LAST_SEEN)
+        if not raw:
+            return None
+        try:
+            return datetime.fromisoformat(raw)
+        except Exception:
+            return None
+
+    def _is_stale(self) -> bool:
+        last_seen = self._get_last_seen()
+        if last_seen is None:
+            return True  # safe default
+
+        stale_after = int(self.entry.options.get(OPT_STALE_AFTER_MIN, DEFAULT_STALE_AFTER_MIN))
+        return (datetime.now(timezone.utc) - last_seen) > timedelta(minutes=stale_after)
+
     async def _tick(self, now) -> None:
         # Prevent overlapping runs
         async with self._lock:
@@ -82,6 +99,9 @@ class PlantEngine:
     async def evaluate_and_water(self) -> WaterResult:
         """Evaluate conditions and water if needed."""
         if not self.entry.options.get(OPT_AUTO_WATER, False):
+            return WaterResult(ran=False, confirmed_on=False)
+
+        if self._is_stale():
             return WaterResult(ran=False, confirmed_on=False)
 
         moisture_entity = self.entry.data[CONF_MOISTURE_ENTITY]
