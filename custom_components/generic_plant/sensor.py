@@ -20,6 +20,7 @@ from .const import (
     OPT_LAST_WATERED,
     OPT_LAST_SEEN,
     OPT_HEARTBEAT_TOPIC,
+    OPT_LAST_STALE_NOTIFY,
 )
 
 
@@ -34,7 +35,6 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up plant sensors for a config entry."""
     plant_name: str = entry.data[CONF_PLANT_NAME]
     moisture_entity_id: str = entry.data[CONF_MOISTURE_ENTITY]
 
@@ -116,7 +116,7 @@ class PlantMoistureProxy(_BasePlantSensor):
         """Update moisture proxy and stamp last_seen when the *entity* changes."""
         self._sync_from_source()
 
-        # This will only fire when HA sees a state-change event for the entity
+        # This only fires when HA sees a state-change event for the entity
         now_iso = datetime.now(timezone.utc).isoformat()
         self.hass.config_entries.async_update_entry(
             self.entry,
@@ -161,6 +161,7 @@ class PlantLastSeenSensor(_BasePlantSensor):
 
     - Updates on entity change events (generic)
     - If heartbeat_topic is configured, also updates on every MQTT message (works for repeated values)
+    - Clears stale-notify throttle stamp on fresh readings (enables one-notify-per-episode)
     """
 
     _attr_device_class = SensorDeviceClass.TIMESTAMP
@@ -193,17 +194,19 @@ class PlantLastSeenSensor(_BasePlantSensor):
             self._unsub_mqtt = None
 
     def _touch(self) -> None:
-        """Update runtime + persist to options + publish state."""
+        """Update runtime + persist to options + publish state.
+
+        Also clears the stale-notify throttle stamp so a NEW stale episode can notify again.
+        """
         self._last_seen_dt = datetime.now(timezone.utc)
         now_iso = self._last_seen_dt.isoformat()
 
-        # Persist so it survives restarts
-        self.hass.config_entries.async_update_entry(
-            self.entry,
-            options={**self.entry.options, OPT_LAST_SEEN: now_iso},
-        )
+        new_options = {**self.entry.options, OPT_LAST_SEEN: now_iso}
 
-        # Update entity immediately
+        # ✅ Clear stale-notify throttle on recovery (fresh reading)
+        new_options.pop(OPT_LAST_STALE_NOTIFY, None)
+
+        self.hass.config_entries.async_update_entry(self.entry, options=new_options)
         self.async_write_ha_state()
 
     async def _on_mqtt(self, msg) -> None:
@@ -212,5 +215,4 @@ class PlantLastSeenSensor(_BasePlantSensor):
 
     @property
     def native_value(self) -> datetime | None:
-        # Prefer runtime value; fallback to stored option if runtime not set yet
         return self._last_seen_dt
