@@ -178,21 +178,17 @@ class PlantEngine:
         """Evaluate conditions and water if needed."""
         plant_name = self.entry.data.get(CONF_PLANT_NAME, "Plant")
 
-        # 1) Auto mode must be enabled
-        if not self.entry.options.get(OPT_AUTO_WATER, False):
-            return WaterResult(ran=False, confirmed_on=False)
-
-        # 2) Sensor must be fresh (not stale/unavailable)
+        # 1) Sensor freshness check first (independent of Auto Water).
+        # This lets us notify about stale sensors even if Auto Water is OFF.
         if not self._is_fresh_enough():
-            # Notify (throttled) that we're blocked due to stale/unavailable
             if bool(self.entry.options.get(OPT_NOTIFY_ON_STALE, False)):
                 if not _should_throttle(self.entry, OPT_LAST_STALE_NOTIFY, minutes=120):
                     await _send_notify(
                         self.hass,
                         self.entry,
                         enabled_key=OPT_NOTIFY_ON_STALE,
-                        title=f"🌱 {plant_name} skipped watering",
-                        message="Sensor is stale/unavailable. Auto-watering is blocked until fresh readings resume.",
+                        title=f"🌱 {plant_name} sensor stale",
+                        message="No fresh readings. Auto-watering is blocked until readings resume.",
                     )
                     self.hass.config_entries.async_update_entry(
                         self.entry,
@@ -205,6 +201,10 @@ class PlantEngine:
             new_opts = dict(self.entry.options)
             new_opts.pop(OPT_LAST_STALE_NOTIFY, None)
             self.hass.config_entries.async_update_entry(self.entry, options=new_opts)
+
+        # 2) Auto mode must be enabled to actually water
+        if not self.entry.options.get(OPT_AUTO_WATER, False):
+            return WaterResult(ran=False, confirmed_on=False)
 
         moisture_entity = self.entry.data[CONF_MOISTURE_ENTITY]
         pump_switch = self.entry.data[CONF_PUMP_SWITCH]
