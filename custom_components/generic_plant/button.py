@@ -22,6 +22,7 @@ from .const import (
 from .engine import PlantEngine
 
 from .notify_util import send_notify
+from .util import cfg
 
 
 async def async_setup_entry(
@@ -62,24 +63,28 @@ class PlantWaterNowButton(_BasePlantButton):
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         super().__init__(hass, entry)
-        self.pump_switch = entry.data[CONF_PUMP_SWITCH]
         self._attr_unique_id = f"{entry.entry_id}_water_now"
 
     async def async_press(self) -> None:
+        # ✅ Read current pump switch at press time (so options changes take effect immediately)
+        pump_switch = cfg(self.entry, CONF_PUMP_SWITCH)
+        if not pump_switch:
+            return
+
         duration_s = int(self.entry.options.get(OPT_PUMP_DURATION_S, DEFAULT_PUMP_DURATION_S))
 
         # 1) Turn pump on
         await self.hass.services.async_call(
             "switch",
             "turn_on",
-            {"entity_id": self.pump_switch},
+            {"entity_id": pump_switch},
             blocking=True,
         )
 
         # 2) Confirm ON (up to 5s)
-        confirmed = await self._wait_for_state(self.pump_switch, "on", timeout_s=5)
+        confirmed = await self._wait_for_state(pump_switch, "on", timeout_s=5)
 
-        # 3) If confirmed, record last watered
+        # 3) If confirmed, record last watered + notify (your existing logic)
         if confirmed:
             now_iso = datetime.now(timezone.utc).isoformat()
             self.hass.config_entries.async_update_entry(
@@ -96,29 +101,15 @@ class PlantWaterNowButton(_BasePlantButton):
                 option_notify_enabled_key=OPT_NOTIFY_ON_WATER,
             )
 
-
         # 4) Run for duration, then OFF
         await asyncio.sleep(max(1, int(duration_s)))
 
         await self.hass.services.async_call(
             "switch",
             "turn_off",
-            {"entity_id": self.pump_switch},
+            {"entity_id": pump_switch},
             blocking=True,
         )
-
-    async def _wait_for_state(self, entity_id: str, desired: str, timeout_s: int) -> bool:
-        st = self.hass.states.get(entity_id)
-        if st and st.state == desired:
-            return True
-
-        end = self.hass.loop.time() + timeout_s
-        while self.hass.loop.time() < end:
-            await asyncio.sleep(0.2)
-            st = self.hass.states.get(entity_id)
-            if st and st.state == desired:
-                return True
-        return False
 
 
 class PlantEvaluateNowButton(_BasePlantButton):
