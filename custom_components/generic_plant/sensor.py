@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from homeassistant.components.sensor import SensorEntity, SensorDeviceClass
+from homeassistant.components.sensor import SensorEntity, SensorDeviceClass, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo
@@ -25,6 +25,8 @@ from .const import (
     OPT_LAST_DECISION,
 )
 
+from .util import cfg
+
 
 @dataclass(frozen=True)
 class PlantRuntime:
@@ -38,7 +40,7 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     plant_name: str = entry.data[CONF_PLANT_NAME]
-    moisture_entity_id: str = entry.data[CONF_MOISTURE_ENTITY]
+    moisture_entity_id: str = cfg(entry, CONF_MOISTURE_ENTITY)
     runtime = PlantRuntime(plant_name=plant_name, moisture_entity_id=moisture_entity_id)
 
     async_add_entities(
@@ -79,6 +81,7 @@ class PlantMoistureProxy(_BasePlantSensor):
     """
 
     _attr_device_class = SensorDeviceClass.MOISTURE
+    _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_native_unit_of_measurement = PERCENTAGE
     _attr_icon = "mdi:water-percent"
 
