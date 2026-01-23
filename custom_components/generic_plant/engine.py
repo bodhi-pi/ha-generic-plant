@@ -36,6 +36,8 @@ from .const import (
     OPT_LAST_DECISION,
 )
 
+from .util import cfg
+
 
 # --------------------------
 # Internal helper structures
@@ -145,6 +147,8 @@ class PlantEngine:
 
     # ---- state helpers ----
     def _get_float_state(self, entity_id: str) -> float | None:
+        if not entity_id:
+            return None
         st = self.hass.states.get(entity_id)
         if not st:
             return None
@@ -217,7 +221,6 @@ class PlantEngine:
             return WaterResult(ran=False, confirmed_on=False)
 
         # Sensor is fresh now — clear stale notify throttle so a NEW stale episode can notify again.
-        # (You also clear this on fresh readings in sensor.py; this is an extra safety net.)
         if OPT_LAST_STALE_NOTIFY in self.entry.options:
             new_opts = dict(self.entry.options)
             new_opts.pop(OPT_LAST_STALE_NOTIFY, None)
@@ -228,8 +231,17 @@ class PlantEngine:
             self._set_decision("skipped_auto_off")
             return WaterResult(ran=False, confirmed_on=False)
 
-        moisture_entity = self.entry.data[CONF_MOISTURE_ENTITY]
-        pump_switch = self.entry.data[CONF_PUMP_SWITCH]
+        # Resolve the configured moisture + pump entities (options override data)
+        moisture_entity = cfg(self.entry, CONF_MOISTURE_ENTITY)
+        pump_switch = cfg(self.entry, CONF_PUMP_SWITCH)
+
+        if not moisture_entity:
+            self._set_decision("skipped_no_moisture_entity")
+            return WaterResult(ran=False, confirmed_on=False)
+
+        if not pump_switch:
+            self._set_decision("skipped_no_pump_switch")
+            return WaterResult(ran=False, confirmed_on=False)
 
         # 3) Must have a numeric moisture value
         moisture = self._get_float_state(moisture_entity)
@@ -249,14 +261,13 @@ class PlantEngine:
             return WaterResult(ran=False, confirmed_on=False)
 
         duration_s = int(self.entry.options.get(OPT_PUMP_DURATION_S, DEFAULT_PUMP_DURATION_S))
-        result = await self._run_pump(
+        return await self._run_pump(
             plant_name=plant_name,
             pump_switch=pump_switch,
             duration_s=duration_s,
             moisture=moisture,
             threshold=threshold,
         )
-        return result
 
     async def _run_pump(
         self,
@@ -268,12 +279,10 @@ class PlantEngine:
         threshold: float,
     ) -> WaterResult:
         """Turn pump on, confirm ON, set last_watered, run duration, then turn off."""
-        # Turn pump on
         await self.hass.services.async_call(
             "switch", "turn_on", {"entity_id": pump_switch}, blocking=True
         )
 
-        # Confirm ON
         confirmed = await self._wait_for_state(pump_switch, "on", timeout_s=5)
 
         # Failure notification (throttled)
@@ -309,7 +318,6 @@ class PlantEngine:
                 ),
             )
 
-        # Run for duration, then off
         await asyncio.sleep(max(1, int(duration_s)))
 
         await self.hass.services.async_call(

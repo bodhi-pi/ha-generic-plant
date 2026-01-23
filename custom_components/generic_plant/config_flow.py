@@ -108,14 +108,23 @@ class GenericPlantConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 notify_on_stale = False
                 notify_on_failure = False
 
+            # Keep initial setup data minimal (for backward compatibility), but
+            # ALSO store configurable fields in options so they can be edited later.
             return self.async_create_entry(
                 title=self._draft[CONF_PLANT_NAME],
                 data={
+                    # Legacy/back-compat storage
                     CONF_PLANT_NAME: self._draft[CONF_PLANT_NAME],
                     CONF_MOISTURE_ENTITY: self._draft[CONF_MOISTURE_ENTITY],
                     CONF_PUMP_SWITCH: self._draft[CONF_PUMP_SWITCH],
                 },
                 options={
+                    # ✅ Configurable-after-setup fields:
+                    CONF_PLANT_NAME: self._draft[CONF_PLANT_NAME],
+                    CONF_MOISTURE_ENTITY: self._draft[CONF_MOISTURE_ENTITY],
+                    CONF_PUMP_SWITCH: self._draft[CONF_PUMP_SWITCH],
+
+                    # Existing options:
                     OPT_HEARTBEAT_TOPIC: topic,
                     OPT_NOTIFY_SERVICE: notify_service,
                     OPT_NOTIFY_ON_WATER: notify_on_water,
@@ -153,7 +162,11 @@ class GenericPlantOptionsFlow(config_entries.OptionsFlow):
     async def async_step_init(self, user_input=None):
         notify_choices = _notify_choices(self.hass)
 
-        # Current values
+        # Current values (prefer options, fall back to data)
+        current_name = (self.entry.options.get(CONF_PLANT_NAME) or self.entry.data.get(CONF_PLANT_NAME) or "").strip()
+        current_moisture = self.entry.options.get(CONF_MOISTURE_ENTITY) or self.entry.data.get(CONF_MOISTURE_ENTITY)
+        current_pump = self.entry.options.get(CONF_PUMP_SWITCH) or self.entry.data.get(CONF_PUMP_SWITCH)
+
         current_topic = (self.entry.options.get(OPT_HEARTBEAT_TOPIC) or "").strip()
         current_notify_service = (self.entry.options.get(OPT_NOTIFY_SERVICE) or "").strip()
         current_notify_on_water = bool(self.entry.options.get(OPT_NOTIFY_ON_WATER, False))
@@ -161,10 +174,14 @@ class GenericPlantOptionsFlow(config_entries.OptionsFlow):
         current_notify_on_failure = bool(self.entry.options.get(OPT_NOTIFY_ON_FAILURE, False))
 
         # Auto-suggest heartbeat topic only if blank
-        if not current_topic:
-            current_topic = _suggest_heartbeat_from_entity(self.hass, self.entry.data[CONF_MOISTURE_ENTITY])
+        if not current_topic and current_moisture:
+            current_topic = _suggest_heartbeat_from_entity(self.hass, current_moisture)
 
         if user_input is not None:
+            new_name = (user_input.get(CONF_PLANT_NAME) or "").strip()
+            new_moisture = user_input.get(CONF_MOISTURE_ENTITY)
+            new_pump = user_input.get(CONF_PUMP_SWITCH)
+
             topic = (user_input.get(OPT_HEARTBEAT_TOPIC) or "").strip()
             notify_service = (user_input.get(OPT_NOTIFY_SERVICE) or "").strip()
 
@@ -177,9 +194,16 @@ class GenericPlantOptionsFlow(config_entries.OptionsFlow):
                 notify_on_stale = False
                 notify_on_failure = False
 
-            # ✅ IMPORTANT: merge (do not overwrite) so we don't wipe last_watered, thresholds, etc.
+            # ✅ IMPORTANT: merge (do not overwrite) so we don't wipe thresholds, last_watered, etc.
             new_options = {
                 **self.entry.options,
+
+                # ✅ Make core things editable:
+                CONF_PLANT_NAME: new_name,
+                CONF_MOISTURE_ENTITY: new_moisture,
+                CONF_PUMP_SWITCH: new_pump,
+
+                # Existing options:
                 OPT_HEARTBEAT_TOPIC: topic,
                 OPT_NOTIFY_SERVICE: notify_service,
                 OPT_NOTIFY_ON_WATER: notify_on_water,
@@ -187,13 +211,27 @@ class GenericPlantOptionsFlow(config_entries.OptionsFlow):
                 OPT_NOTIFY_ON_FAILURE: notify_on_failure,
             }
 
+            # Also update the config entry title so UI matches the plant name.
+            # (This does not require delete/re-add.)
+            if new_name and new_name != self.entry.title:
+                self.hass.config_entries.async_update_entry(self.entry, title=new_name)
+
             return self.async_create_entry(title="", data=new_options)
 
         schema = vol.Schema(
             {
+                # ✅ now editable after setup:
+                vol.Required(CONF_PLANT_NAME, default=current_name): str,
+                vol.Required(CONF_MOISTURE_ENTITY, default=current_moisture): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="sensor")
+                ),
+                vol.Required(CONF_PUMP_SWITCH, default=current_pump): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="switch")
+                ),
+
+                # existing options:
                 vol.Optional(OPT_HEARTBEAT_TOPIC, default=current_topic): str,
                 vol.Optional(OPT_NOTIFY_SERVICE, default=current_notify_service): vol.In(notify_choices),
-
                 vol.Optional(OPT_NOTIFY_ON_WATER, default=current_notify_on_water): bool,
                 vol.Optional(OPT_NOTIFY_ON_STALE, default=current_notify_on_stale): bool,
                 vol.Optional(OPT_NOTIFY_ON_FAILURE, default=current_notify_on_failure): bool,
