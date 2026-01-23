@@ -107,7 +107,7 @@ class PlantWaterNowButton(_BasePlantButton):
                 "switch",
                 "turn_off",
                 {"entity_id": pump_switch},
-                blocking=False,
+                blocking=True,
             )
 
 
@@ -122,6 +122,8 @@ class PlantEvaluateNowButton(_BasePlantButton):
         self._attr_unique_id = f"{entry.entry_id}_evaluate_now"
 
     async def async_press(self) -> None:
-        engine: PlantEngine | None = self.hass.data.get(DOMAIN, {}).get(self.entry.entry_id)
-        if engine:
-            await engine.evaluate_and_water()
+        runtime = self.hass.data.get(DOMAIN, {}).get(self.entry.entry_id)
+        if isinstance(runtime, dict):
+            engine = runtime.get("engine")
+            if isinstance(engine, PlantEngine):
+                await engine.evaluate_and_water()
