@@ -12,9 +12,12 @@ from .const import (
     DOMAIN,
     CONF_PLANT_NAME,
     CONF_PUMP_SWITCH,
+    OPT_PUMP_DURATION_S,
+    DEFAULT_PUMP_DURATION_S,
     OPT_LAST_WATERED,
 )
 from .engine import PlantEngine
+from .util import cfg
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
@@ -28,8 +31,6 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
 
 class _BasePlantButton(ButtonEntity):
-    """Shared base for plant buttons."""
-
     _attr_has_entity_name = True
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
@@ -60,7 +61,7 @@ class _BasePlantButton(ButtonEntity):
 
 
 class PlantWaterNowButton(_BasePlantButton):
-    """Immediately run the pump once, bypassing auto logic."""
+    """Immediately run the pump once, using the currently configured pump switch."""
 
     _attr_name = "Water Now"
     _attr_icon = "mdi:watering-can"
@@ -70,9 +71,12 @@ class PlantWaterNowButton(_BasePlantButton):
         self._attr_unique_id = f"{entry.entry_id}_water_now"
 
     async def async_press(self) -> None:
-        pump_switch = self.entry.data.get(CONF_PUMP_SWITCH)
+        # ✅ Always resolve pump switch at press time (so Options Flow changes apply immediately)
+        pump_switch = cfg(self.entry, CONF_PUMP_SWITCH)
         if not pump_switch:
             return
+
+        duration_s = int(self.entry.options.get(OPT_PUMP_DURATION_S, DEFAULT_PUMP_DURATION_S))
 
         try:
             # Turn pump ON
@@ -83,22 +87,22 @@ class PlantWaterNowButton(_BasePlantButton):
                 blocking=True,
             )
 
-            # Confirm ON
+            # Confirm ON (up to 5s)
             confirmed = await self._wait_for_state(pump_switch, "on", timeout_s=5)
 
+            # If confirmed, stamp last_watered
             if confirmed:
-                # Stamp last_watered
                 now_iso = datetime.now(timezone.utc).isoformat()
                 self.hass.config_entries.async_update_entry(
                     self.entry,
                     options={**self.entry.options, OPT_LAST_WATERED: now_iso},
                 )
 
-            # Run for a short fixed duration (manual override)
-            await asyncio.sleep(5)
+            # Keep ON for configured duration
+            await asyncio.sleep(max(1, int(duration_s)))
 
         finally:
-            # ALWAYS turn pump OFF
+            # ALWAYS turn pump OFF, even if something above fails
             await self.hass.services.async_call(
                 "switch",
                 "turn_off",
@@ -118,8 +122,6 @@ class PlantEvaluateNowButton(_BasePlantButton):
         self._attr_unique_id = f"{entry.entry_id}_evaluate_now"
 
     async def async_press(self) -> None:
-        engine: PlantEngine | None = (
-            self.hass.data.get(DOMAIN, {}).get(self.entry.entry_id)
-        )
+        engine: PlantEngine | None = self.hass.data.get(DOMAIN, {}).get(self.entry.entry_id)
         if engine:
             await engine.evaluate_and_water()
