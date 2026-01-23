@@ -123,6 +123,13 @@ class PlantEvaluateNowButton(_BasePlantButton):
 
     async def async_press(self) -> None:
         runtime = self.hass.data.get(DOMAIN, {}).get(self.entry.entry_id)
+
+        # Back-compat: older versions stored engine directly
+        if isinstance(runtime, PlantEngine):
+            await runtime.evaluate_and_water()
+            return
+
+        # Current: runtime dict
         if isinstance(runtime, dict):
             engine = runtime.get("engine")
             if isinstance(engine, PlantEngine):
