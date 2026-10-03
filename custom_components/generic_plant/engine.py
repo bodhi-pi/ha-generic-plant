@@ -12,6 +12,10 @@ from .const import (
     CONF_PLANT_NAME,
     CONF_MOISTURE_ENTITY,
     CONF_PUMP_SWITCH,
+    PLANT_MODE,
+    MODE_AUTO,
+    MODE_SENSOR,
+    MODE_MANUAL,
     OPT_AUTO_WATER,
     OPT_THRESHOLD,
     OPT_PUMP_DURATION_S,
@@ -19,29 +23,27 @@ from .const import (
     OPT_LAST_WATERED,
     OPT_LAST_SEEN,
     OPT_STALE_AFTER_MIN,
+    OPT_WATER_INTERVAL_DAYS,
     DEFAULT_THRESHOLD,
     DEFAULT_PUMP_DURATION_S,
     DEFAULT_COOLDOWN_MIN,
     DEFAULT_STALE_AFTER_MIN,
-    # Notifications
+    DEFAULT_WATER_INTERVAL_DAYS,
     OPT_NOTIFY_SERVICE,
     OPT_NOTIFY_ON_WATER,
     OPT_NOTIFY_ON_STALE,
     OPT_NOTIFY_ON_FAILURE,
-    # Notification throttles
     OPT_LAST_STALE_NOTIFY,
     OPT_LAST_FAILURE_NOTIFY,
-    # Diagnostics
     OPT_LAST_EVALUATED,
     OPT_LAST_DECISION,
-)
+    OPT_WATERING_EVENT,
+    OPT_LAST_WATER_NOTIFY,
 
+)
 from .util import cfg
 
 
-# --------------------------
-# Internal helper structures
-# --------------------------
 @dataclass
 class WaterResult:
     ran: bool
@@ -52,7 +54,6 @@ class WaterResult:
 # Notification helpers
 # --------------------------
 def _split_notify_service(svc: str) -> tuple[str, str] | None:
-    """Parse 'notify.mobile_app_x' -> ('notify','mobile_app_x')."""
     svc = (svc or "").strip()
     if not svc or "." not in svc:
         return None
@@ -67,7 +68,6 @@ def _now_iso() -> str:
 
 
 def _should_throttle(entry: ConfigEntry, last_key: str, *, minutes: int) -> bool:
-    """Return True if a notification was sent recently."""
     raw = entry.options.get(last_key)
     if not raw:
         return False
@@ -86,14 +86,11 @@ async def _send_notify(
     title: str,
     message: str,
 ) -> None:
-    """Send a notify.* message if configured and enabled."""
     notify_service = (entry.options.get(OPT_NOTIFY_SERVICE) or "").strip()
     enabled = bool(entry.options.get(enabled_key, False))
     split = _split_notify_service(notify_service)
-
     if not enabled or not split:
         return
-
     domain, service_name = split
     await hass.services.async_call(
         domain,
@@ -107,7 +104,6 @@ async def _send_notify(
 # Engine
 # --------------------------
 class PlantEngine:
-    """Per-plant engine: periodically evaluates whether to water and executes safely."""
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self.hass = hass
@@ -127,13 +123,11 @@ class PlantEngine:
             self._unsub_timer = None
 
     async def _tick(self, now) -> None:
-        # Prevent overlapping runs
         async with self._lock:
             await self.evaluate_and_water()
 
     # ---- option helpers ----
     def _update_options(self, **updates) -> None:
-        """Merge updates into entry.options."""
         self.hass.config_entries.async_update_entry(
             self.entry,
             options={**self.entry.options, **updates},
@@ -145,7 +139,16 @@ class PlantEngine:
     def _touch_evaluated(self) -> None:
         self._update_options(**{OPT_LAST_EVALUATED: _now_iso()})
 
+    async def _spike_watering_event(self) -> None:
+        """Write 100 then 0 with a short delay so recorder captures both states."""
+        self._update_options(**{OPT_WATERING_EVENT: 100})
+        await asyncio.sleep(5400)  # 90 minutes — ensures capture at 2 points/hour sampling
+        self._update_options(**{OPT_WATERING_EVENT: 0})
+
     # ---- state helpers ----
+    def _mode(self) -> str:
+        return self.entry.options.get(PLANT_MODE, MODE_AUTO)
+
     def _get_float_state(self, entity_id: str) -> float | None:
         if not entity_id:
             return None
@@ -175,7 +178,6 @@ class PlantEngine:
             return True
         return (datetime.now(timezone.utc) - last) > timedelta(minutes=cd_min)
 
-    # ---- freshness / staleness guard ----
     def _get_last_seen(self) -> datetime | None:
         raw = self.entry.options.get(OPT_LAST_SEEN)
         if not raw:
@@ -186,24 +188,24 @@ class PlantEngine:
             return None
 
     def _is_fresh_enough(self) -> bool:
-        """True only when we have a recent reading (prevents watering on stale/unknown data)."""
         last_seen = self._get_last_seen()
         if last_seen is None:
-            return False  # unknown -> unsafe
-
+            return False
         stale_after = int(self.entry.options.get(OPT_STALE_AFTER_MIN, DEFAULT_STALE_AFTER_MIN))
         return (datetime.now(timezone.utc) - last_seen) <= timedelta(minutes=stale_after)
 
-    # ---- main logic ----
+    # ---- main evaluation ----
     async def evaluate_and_water(self) -> WaterResult:
-        """Evaluate conditions and water if needed."""
         plant_name = self.entry.data.get(CONF_PLANT_NAME, "Plant")
+        mode = self._mode()
 
-        # Always stamp that we evaluated (even if we do nothing)
         self._touch_evaluated()
 
-        # 1) Sensor freshness check first (independent of Auto Water).
-        # This allows stale notifications even if Auto Water is OFF.
+        # --- Manual mode: schedule-based, no sensor ---
+        if mode == MODE_MANUAL:
+            return await self._evaluate_manual(plant_name)
+
+        # --- Sensor-based modes (auto + sensor_only): freshness check first ---
         if not self._is_fresh_enough():
             self._set_decision("skipped_stale_or_unavailable")
 
@@ -214,48 +216,54 @@ class PlantEngine:
                         self.entry,
                         enabled_key=OPT_NOTIFY_ON_STALE,
                         title=f"🌱 {plant_name} sensor stale",
-                        message="No fresh readings. Auto-watering is blocked until readings resume.",
+                        message="No fresh readings. Watering is blocked until readings resume.",
                     )
                     self._update_options(**{OPT_LAST_STALE_NOTIFY: _now_iso()})
 
             return WaterResult(ran=False, confirmed_on=False)
 
-        # Sensor is fresh now — clear stale notify throttle so a NEW stale episode can notify again.
+        # Clear stale throttle on recovery
         if OPT_LAST_STALE_NOTIFY in self.entry.options:
             new_opts = dict(self.entry.options)
             new_opts.pop(OPT_LAST_STALE_NOTIFY, None)
             self.hass.config_entries.async_update_entry(self.entry, options=new_opts)
 
-        # 2) Auto mode must be enabled to actually water
+        # --- Sensor-only mode: dashboard tracking only. No pump, no cooldown,
+        # no notify_on_water, no last_watered/watering_event side effects —
+        # there is nothing being watered, so nothing here is allowed to look
+        # like a watering decision. ---
+        if mode == MODE_SENSOR:
+            return self._evaluate_sensor_only()
+
+        # From here down: MODE_AUTO only.
         if not self.entry.options.get(OPT_AUTO_WATER, False):
             self._set_decision("skipped_auto_off")
             return WaterResult(ran=False, confirmed_on=False)
 
-        # Resolve the configured moisture + pump entities (options override data)
         moisture_entity = cfg(self.entry, CONF_MOISTURE_ENTITY)
-        pump_switch = cfg(self.entry, CONF_PUMP_SWITCH)
-
         if not moisture_entity:
             self._set_decision("skipped_no_moisture_entity")
             return WaterResult(ran=False, confirmed_on=False)
 
-        if not pump_switch:
-            self._set_decision("skipped_no_pump_switch")
-            return WaterResult(ran=False, confirmed_on=False)
-
-        # 3) Must have a numeric moisture value
         moisture = self._get_float_state(moisture_entity)
         if moisture is None:
             self._set_decision("skipped_no_moisture_value")
             return WaterResult(ran=False, confirmed_on=False)
 
-        # 4) Must be below threshold
         threshold = float(self.entry.options.get(OPT_THRESHOLD, DEFAULT_THRESHOLD))
         if moisture >= threshold:
             self._set_decision("skipped_above_threshold")
             return WaterResult(ran=False, confirmed_on=False)
 
-        # 5) Must pass cooldown
+        # A plant with no pump_switch configured can never reach a "watered"
+        # decision or fire notify_on_water — check this before cooldown so a
+        # misconfigured pump-less plant reads as "skipped_no_pump_switch",
+        # not a rotating "skipped_cooldown" that looks like it's alive.
+        pump_switch = cfg(self.entry, CONF_PUMP_SWITCH)
+        if not pump_switch:
+            self._set_decision("skipped_no_pump_switch")
+            return WaterResult(ran=False, confirmed_on=False)
+
         if not self._cooldown_ok():
             self._set_decision("skipped_cooldown")
             return WaterResult(ran=False, confirmed_on=False)
@@ -269,6 +277,76 @@ class PlantEngine:
             threshold=threshold,
         )
 
+    # ---- mode-specific execution ----
+    async def _evaluate_manual(self, plant_name: str) -> WaterResult:
+        """Schedule-based evaluation for plants with no sensor."""
+        interval_days = float(self.entry.options.get(OPT_WATER_INTERVAL_DAYS, DEFAULT_WATER_INTERVAL_DAYS))
+        last_watered = self._get_last_watered()
+
+        if last_watered is not None:
+            overdue = (datetime.now(timezone.utc) - last_watered) > timedelta(days=interval_days)
+        else:
+            overdue = True
+
+        if not overdue:
+            self._set_decision("skipped_not_overdue")
+            return WaterResult(ran=False, confirmed_on=False)
+
+        if not self._cooldown_ok():
+            self._set_decision("skipped_cooldown")
+            return WaterResult(ran=False, confirmed_on=False)
+
+        if _should_throttle(self.entry, OPT_LAST_WATER_NOTIFY, minutes=1440):
+            self._set_decision("skipped_notify_throttle")
+            return WaterResult(ran=False, confirmed_on=False)
+
+        if last_watered:
+            days_since = (datetime.now(timezone.utc) - last_watered).days
+            message = f"Last watered {days_since} day(s) ago. Time to water!"
+        else:
+            message = "No watering recorded yet. Time to water!"
+
+        await _send_notify(
+            self.hass,
+            self.entry,
+            enabled_key=OPT_NOTIFY_ON_WATER,
+            title=f"🌱 {plant_name} needs water",
+            message=message,
+        )
+
+        self._update_options(**{OPT_LAST_WATER_NOTIFY: _now_iso()})
+        self._set_decision("notified_overdue")
+
+        return WaterResult(ran=False, confirmed_on=False)
+
+
+    def _evaluate_sensor_only(self) -> WaterResult:
+        """Sensor_only mode: read moisture for the dashboard and stop.
+
+        Deliberately does not touch OPT_LAST_WATERED, OPT_WATERING_EVENT, or
+        notify_on_water — this mode has no pump, so nothing here should ever
+        be able to look like a completed watering. Cooldown does not apply
+        either: cooldown throttles *pump* actuation, and there is none.
+        """
+        moisture_entity = cfg(self.entry, CONF_MOISTURE_ENTITY)
+        if not moisture_entity:
+            self._set_decision("skipped_no_moisture_entity")
+            return WaterResult(ran=False, confirmed_on=False)
+
+        moisture = self._get_float_state(moisture_entity)
+        if moisture is None:
+            self._set_decision("skipped_no_moisture_value")
+            return WaterResult(ran=False, confirmed_on=False)
+
+        threshold = float(self.entry.options.get(OPT_THRESHOLD, DEFAULT_THRESHOLD))
+        if moisture < threshold:
+            self._set_decision("sensor_only_below_threshold")
+        else:
+            self._set_decision("sensor_only_above_threshold")
+
+        return WaterResult(ran=False, confirmed_on=False)
+
+    # ---- pump execution (auto mode only) ----
     async def _run_pump(
         self,
         *,
@@ -278,17 +356,14 @@ class PlantEngine:
         moisture: float,
         threshold: float,
     ) -> WaterResult:
-        """Turn pump on, confirm ON, set last_watered, run duration, then turn off."""
         await self.hass.services.async_call(
             "switch", "turn_on", {"entity_id": pump_switch}, blocking=True
         )
 
         confirmed = await self._wait_for_state(pump_switch, "on", timeout_s=5)
 
-        # Failure notification (throttled)
         if not confirmed:
             self._set_decision("failed_pump_confirm_on")
-
             if bool(self.entry.options.get(OPT_NOTIFY_ON_FAILURE, False)):
                 if not _should_throttle(self.entry, OPT_LAST_FAILURE_NOTIFY, minutes=60):
                     await _send_notify(
@@ -300,12 +375,10 @@ class PlantEngine:
                     )
                     self._update_options(**{OPT_LAST_FAILURE_NOTIFY: _now_iso()})
 
-        # Only stamp last_watered + notify success if pump actually reported ON
         if confirmed:
-            now_iso = _now_iso()
-            self._update_options(**{OPT_LAST_WATERED: now_iso})
+            self._update_options(**{OPT_LAST_WATERED: _now_iso()})
             self._set_decision("watered")
-
+            await self._spike_watering_event()
             await _send_notify(
                 self.hass,
                 self.entry,
@@ -319,7 +392,6 @@ class PlantEngine:
             )
 
         await asyncio.sleep(max(1, int(duration_s)))
-
         await self.hass.services.async_call(
             "switch", "turn_off", {"entity_id": pump_switch}, blocking=True
         )
@@ -330,7 +402,6 @@ class PlantEngine:
         st = self.hass.states.get(entity_id)
         if st and st.state == desired:
             return True
-
         end = self.hass.loop.time() + timeout_s
         while self.hass.loop.time() < end:
             await asyncio.sleep(0.2)

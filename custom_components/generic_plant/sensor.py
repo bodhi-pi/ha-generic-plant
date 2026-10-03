@@ -17,13 +17,19 @@ from .const import (
     DOMAIN,
     CONF_PLANT_NAME,
     CONF_MOISTURE_ENTITY,
+    PLANT_MODE,
+    MODE_AUTO,
+    MODE_SENSOR,
+    MODE_MANUAL,
     OPT_LAST_WATERED,
     OPT_LAST_SEEN,
     OPT_HEARTBEAT_TOPIC,
     OPT_LAST_STALE_NOTIFY,
     OPT_LAST_EVALUATED,
     OPT_LAST_DECISION,
+    OPT_WATERING_EVENT,
 )
+
 from .util import cfg
 
 
@@ -38,31 +44,39 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
+    mode = entry.options.get(PLANT_MODE, MODE_AUTO)
     plant_name: str = entry.data[CONF_PLANT_NAME]
-    moisture_entity_id: str = cfg(entry, CONF_MOISTURE_ENTITY)
 
-    runtime = PlantRuntime(plant_name=plant_name, moisture_entity_id=moisture_entity_id)
+    entities = [
+        PlantLastWateredSensor(hass, entry),
+        PlantLastEvaluatedSensor(hass, entry),
+        PlantLastDecisionSensor(hass, entry),
+        PlantWateringEventSensor(hass, entry),  # NEW
+    ]
 
-    moisture = PlantMoistureProxy(hass, entry, runtime)
-    last_seen = PlantLastSeenSensor(hass, entry, runtime)
-    last_watered = PlantLastWateredSensor(hass, entry, runtime)
-    last_eval = PlantLastEvaluatedSensor(hass, entry, runtime)
-    last_decision = PlantLastDecisionSensor(hass, entry, runtime)
+    if mode in (MODE_AUTO, MODE_SENSOR):
+        moisture_entity_id = cfg(entry, CONF_MOISTURE_ENTITY)
+        runtime = PlantRuntime(plant_name=plant_name, moisture_entity_id=moisture_entity_id)
 
-    async_add_entities(
-        [moisture, last_seen, last_watered, last_eval, last_decision],
-        update_before_add=True,
-    )
+        moisture = PlantMoistureProxy(hass, entry, runtime)
+        last_seen = PlantLastSeenSensor(hass, entry, runtime)
 
-    # Register a manager so __init__.py can reconfigure in place on options changes
-    runtime_dict = hass.data.get(DOMAIN, {}).get(entry.entry_id)
-    if runtime_dict is not None:
-        runtime_dict["sensors"] = PlantSensorManager(moisture, last_seen)
+        entities += [moisture, last_seen]
+
+        # Register sensor manager for reconfiguration on options changes
+        runtime_dict = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+        if runtime_dict is not None:
+            runtime_dict["sensors"] = PlantSensorManager(moisture, last_seen)
+    else:
+        # Manual mode: no moisture sensor, no reconfiguration needed
+        runtime_dict = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+        if runtime_dict is not None:
+            runtime_dict["sensors"] = None
+
+    async_add_entities(entities, update_before_add=True)
 
 
 class PlantSensorManager:
-    """Central place to rebind subscriptions when options change."""
-
     def __init__(self, moisture: "PlantMoistureProxy", last_seen: "PlantLastSeenSensor") -> None:
         self.moisture = moisture
         self.last_seen = last_seen
@@ -73,26 +87,22 @@ class PlantSensorManager:
 
 
 class _BasePlantSensor(SensorEntity):
-    """Base entity that attaches to the per-plant device."""
-
     _attr_has_entity_name = True
 
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, runtime: PlantRuntime) -> None:
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, runtime: PlantRuntime | None = None) -> None:
         self.hass = hass
         self.entry = entry
         self.runtime = runtime
 
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
-            name=runtime.plant_name,
+            name=entry.data[CONF_PLANT_NAME],
             manufacturer="Generic Plant",
             model="Plant Device",
         )
 
 
 class PlantMoistureProxy(_BasePlantSensor):
-    """Proxy moisture sensor that belongs to the plant device."""
-
     _attr_device_class = SensorDeviceClass.MOISTURE
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_native_unit_of_measurement = PERCENTAGE
@@ -102,11 +112,8 @@ class PlantMoistureProxy(_BasePlantSensor):
         super().__init__(hass, entry, runtime)
         self._attr_name = "Moisture"
         self._attr_unique_id = f"{entry.entry_id}_moisture"
-
         self._native_value: float | None = None
         self._unsub_state = None
-
-        # Track the currently bound source entity id
         self._source_entity_id = runtime.moisture_entity_id
 
     async def async_added_to_hass(self) -> None:
@@ -118,30 +125,19 @@ class PlantMoistureProxy(_BasePlantSensor):
             self._unsub_state = None
 
     async def async_rebind_source(self, *, initial: bool = False) -> None:
-        """Rebind to the currently configured moisture entity (unsubscribe old first)."""
         new_source = cfg(self.entry, CONF_MOISTURE_ENTITY)
         if not new_source:
             return
-
         if (not initial) and new_source == self._source_entity_id:
             return
-
-        # Unsubscribe old listener
         if self._unsub_state:
             self._unsub_state()
             self._unsub_state = None
-
         self._source_entity_id = new_source
         self.runtime.moisture_entity_id = new_source
-
-        # Subscribe new listener
         self._unsub_state = async_track_state_change_event(
-            self.hass,
-            [self._source_entity_id],
-            self._handle_source_event,
+            self.hass, [self._source_entity_id], self._handle_source_event,
         )
-
-        # Pull current value immediately
         self._sync_from_source()
         self.async_write_ha_state()
 
@@ -157,14 +153,11 @@ class PlantMoistureProxy(_BasePlantSensor):
 
     async def _handle_source_event(self, event) -> None:
         self._sync_from_source()
-
-        # Stamp last_seen when the *entity* changes
         now_iso = datetime.now(timezone.utc).isoformat()
         self.hass.config_entries.async_update_entry(
             self.entry,
             options={**self.entry.options, OPT_LAST_SEEN: now_iso},
         )
-
         self.async_write_ha_state()
 
     @property
@@ -176,12 +169,65 @@ class PlantMoistureProxy(_BasePlantSensor):
         return {"source_entity": self._source_entity_id}
 
 
+class PlantLastSeenSensor(_BasePlantSensor):
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+    _attr_icon = "mdi:clock-check"
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, runtime: PlantRuntime) -> None:
+        super().__init__(hass, entry, runtime)
+        self._attr_name = "Last Seen"
+        self._attr_unique_id = f"{entry.entry_id}_last_seen"
+        self._unsub_mqtt = None
+        self._topic: str = ""
+        self._last_seen_dt: datetime | None = None
+
+    async def async_added_to_hass(self) -> None:
+        raw = self.entry.options.get(OPT_LAST_SEEN)
+        if raw:
+            try:
+                self._last_seen_dt = datetime.fromisoformat(raw)
+            except Exception:
+                self._last_seen_dt = None
+        await self.async_rebind_heartbeat(initial=True)
+
+    async def async_will_remove_from_hass(self) -> None:
+        if self._unsub_mqtt:
+            self._unsub_mqtt()
+            self._unsub_mqtt = None
+
+    async def async_rebind_heartbeat(self, *, initial: bool = False) -> None:
+        new_topic = (self.entry.options.get(OPT_HEARTBEAT_TOPIC) or "").strip()
+        if (not initial) and new_topic == self._topic:
+            return
+        if self._unsub_mqtt:
+            self._unsub_mqtt()
+            self._unsub_mqtt = None
+        self._topic = new_topic
+        if self._topic:
+            self._unsub_mqtt = await async_subscribe(self.hass, self._topic, self._on_mqtt)
+
+    def _touch(self) -> None:
+        self._last_seen_dt = datetime.now(timezone.utc)
+        now_iso = self._last_seen_dt.isoformat()
+        new_options = {**self.entry.options, OPT_LAST_SEEN: now_iso}
+        new_options.pop(OPT_LAST_STALE_NOTIFY, None)
+        self.hass.config_entries.async_update_entry(self.entry, options=new_options)
+        self.async_write_ha_state()
+
+    async def _on_mqtt(self, msg) -> None:
+        self._touch()
+
+    @property
+    def native_value(self) -> datetime | None:
+        return self._last_seen_dt
+
+
 class PlantLastWateredSensor(_BasePlantSensor):
     _attr_device_class = SensorDeviceClass.TIMESTAMP
     _attr_icon = "mdi:watering-can"
 
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, runtime: PlantRuntime) -> None:
-        super().__init__(hass, entry, runtime)
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        super().__init__(hass, entry)
         self._attr_name = "Last Watered"
         self._attr_unique_id = f"{entry.entry_id}_last_watered"
 
@@ -196,78 +242,12 @@ class PlantLastWateredSensor(_BasePlantSensor):
             return None
 
 
-class PlantLastSeenSensor(_BasePlantSensor):
-    _attr_device_class = SensorDeviceClass.TIMESTAMP
-    _attr_icon = "mdi:clock-check"
-
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, runtime: PlantRuntime) -> None:
-        super().__init__(hass, entry, runtime)
-        self._attr_name = "Last Seen"
-        self._attr_unique_id = f"{entry.entry_id}_last_seen"
-
-        self._unsub_mqtt = None
-        self._topic: str = ""
-        self._last_seen_dt: datetime | None = None
-
-    async def async_added_to_hass(self) -> None:
-        # Load persisted value if any
-        raw = self.entry.options.get(OPT_LAST_SEEN)
-        if raw:
-            try:
-                self._last_seen_dt = datetime.fromisoformat(raw)
-            except Exception:
-                self._last_seen_dt = None
-
-        await self.async_rebind_heartbeat(initial=True)
-
-    async def async_will_remove_from_hass(self) -> None:
-        if self._unsub_mqtt:
-            self._unsub_mqtt()
-            self._unsub_mqtt = None
-
-    async def async_rebind_heartbeat(self, *, initial: bool = False) -> None:
-        """Resubscribe to heartbeat topic if it changed (unsubscribe old first)."""
-        new_topic = (self.entry.options.get(OPT_HEARTBEAT_TOPIC) or "").strip()
-
-        if (not initial) and new_topic == self._topic:
-            return
-
-        # Unsubscribe old
-        if self._unsub_mqtt:
-            self._unsub_mqtt()
-            self._unsub_mqtt = None
-
-        self._topic = new_topic
-
-        if self._topic:
-            self._unsub_mqtt = await async_subscribe(self.hass, self._topic, self._on_mqtt)
-
-    def _touch(self) -> None:
-        self._last_seen_dt = datetime.now(timezone.utc)
-        now_iso = self._last_seen_dt.isoformat()
-
-        new_options = {**self.entry.options, OPT_LAST_SEEN: now_iso}
-
-        # Clear stale-notify throttle on recovery
-        new_options.pop(OPT_LAST_STALE_NOTIFY, None)
-
-        self.hass.config_entries.async_update_entry(self.entry, options=new_options)
-        self.async_write_ha_state()
-
-    async def _on_mqtt(self, msg) -> None:
-        self._touch()
-
-    @property
-    def native_value(self) -> datetime | None:
-        return self._last_seen_dt
-
-
 class PlantLastEvaluatedSensor(_BasePlantSensor):
     _attr_device_class = SensorDeviceClass.TIMESTAMP
     _attr_icon = "mdi:clock-outline"
 
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, runtime: PlantRuntime) -> None:
-        super().__init__(hass, entry, runtime)
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        super().__init__(hass, entry)
         self._attr_name = "Last Evaluated"
         self._attr_unique_id = f"{entry.entry_id}_last_evaluated"
 
@@ -285,8 +265,8 @@ class PlantLastEvaluatedSensor(_BasePlantSensor):
 class PlantLastDecisionSensor(_BasePlantSensor):
     _attr_icon = "mdi:information-outline"
 
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, runtime: PlantRuntime) -> None:
-        super().__init__(hass, entry, runtime)
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        super().__init__(hass, entry)
         self._attr_name = "Last Decision"
         self._attr_unique_id = f"{entry.entry_id}_last_decision"
 
@@ -294,3 +274,21 @@ class PlantLastDecisionSensor(_BasePlantSensor):
     def native_value(self) -> str | None:
         raw = self.entry.options.get(OPT_LAST_DECISION)
         return str(raw) if raw else None
+
+
+
+class PlantWateringEventSensor(_BasePlantSensor):
+    """Spikes to 100 when watering occurs then returns to 0. Renders as vertical line on graph."""
+
+    _attr_icon = "mdi:water-plus"
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        super().__init__(hass, entry)
+        self._attr_name = "Watering Event"
+        self._attr_unique_id = f"{entry.entry_id}_watering_event"
+
+    @property
+    def native_value(self) -> float:
+        return float(self.entry.options.get(OPT_WATERING_EVENT, 0))

@@ -12,6 +12,8 @@ from homeassistant.helpers.event import async_track_time_interval
 from .const import (
     DOMAIN,
     CONF_PLANT_NAME,
+    PLANT_MODE,
+    MODE_MANUAL,
     OPT_LAST_SEEN,
     OPT_STALE_AFTER_MIN,
     DEFAULT_STALE_AFTER_MIN,
@@ -23,15 +25,19 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
+    mode = entry.options.get(PLANT_MODE, "auto")
+
+    # Stale sensor only meaningful for sensor-based modes
+    if mode == MODE_MANUAL:
+        return
+
     async_add_entities([PlantStaleBinarySensor(hass, entry)], update_before_add=True)
 
 
 class PlantStaleBinarySensor(BinarySensorEntity):
     """True if last_seen is older than stale_after minutes.
 
-    Boot-aware behavior:
-    - If last_seen is missing OR from before this entity started -> entity is unavailable (not "problem")
-    - Once a new reading arrives during this HA runtime -> entity becomes available and evaluates staleness
+    Boot-aware: unavailable until a fresh reading arrives during this runtime.
     """
 
     _attr_has_entity_name = True
@@ -51,17 +57,12 @@ class PlantStaleBinarySensor(BinarySensorEntity):
             model="Plant Device",
         )
 
-        # Timestamp when this entity started (used to avoid "Problem" immediately after restart)
         self._started_at = datetime.now(timezone.utc)
-
         self._unsub_timer = None
 
     async def async_added_to_hass(self) -> None:
-        # Re-check periodically so stale state can change based on time alone.
         self._unsub_timer = async_track_time_interval(
-            self.hass,
-            self._tick,
-            timedelta(seconds=30),
+            self.hass, self._tick, timedelta(seconds=30),
         )
 
     async def async_will_remove_from_hass(self) -> None:
@@ -83,24 +84,17 @@ class PlantStaleBinarySensor(BinarySensorEntity):
 
     @property
     def available(self) -> bool:
-        """Only become available once we have seen a reading during this runtime."""
         last_seen = self._parse_last_seen()
         if last_seen is None:
             return False
-
-        # Only consider valid once updated after we started (prevents startup false "Problem")
         return last_seen >= self._started_at
 
     @property
     def is_on(self) -> bool:
-        """Stale = True when last_seen age exceeds stale_after minutes."""
         last_seen = self._parse_last_seen()
         if last_seen is None:
-            return False  # unavailable() covers the "no data" case
-
-        # If last_seen is from before this runtime, don't declare stale yet.
+            return False
         if last_seen < self._started_at:
             return False
-
         stale_after = int(self.entry.options.get(OPT_STALE_AFTER_MIN, DEFAULT_STALE_AFTER_MIN))
         return (datetime.now(timezone.utc) - last_seen) > timedelta(minutes=stale_after)

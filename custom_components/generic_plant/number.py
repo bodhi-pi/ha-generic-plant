@@ -10,35 +10,46 @@ from homeassistant.const import PERCENTAGE
 from .const import (
     DOMAIN,
     CONF_PLANT_NAME,
+    PLANT_MODE,
+    MODE_AUTO,
+    MODE_SENSOR,
+    MODE_MANUAL,
     OPT_THRESHOLD,
     OPT_PUMP_DURATION_S,
     OPT_COOLDOWN_MIN,
     OPT_STALE_AFTER_MIN,
+    OPT_WATER_INTERVAL_DAYS,
     DEFAULT_THRESHOLD,
     DEFAULT_PUMP_DURATION_S,
     DEFAULT_COOLDOWN_MIN,
     DEFAULT_STALE_AFTER_MIN,
+    DEFAULT_WATER_INTERVAL_DAYS,
 )
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    async_add_entities(
-        [
-            PlantThresholdNumber(hass, entry),
-            PlantPumpDurationNumber(hass, entry),
-            PlantCooldownNumber(hass, entry),
-            PlantStaleAfterNumber(hass, entry),   # <-- add this
-        ],
-        update_before_add=True,
-    )
+    mode = entry.options.get(PLANT_MODE, MODE_AUTO)
+
+    entities = [PlantCooldownNumber(hass, entry)]  # all modes
+
+    if mode in (MODE_AUTO, MODE_SENSOR):
+        entities.append(PlantThresholdNumber(hass, entry))
+        entities.append(PlantStaleAfterNumber(hass, entry))
+
+    if mode == MODE_AUTO:
+        entities.append(PlantPumpDurationNumber(hass, entry))
+
+    if mode == MODE_MANUAL:
+        entities.append(PlantWateringIntervalNumber(hass, entry))
+
+    async_add_entities(entities, update_before_add=True)
 
 
 class _BasePlantNumber(NumberEntity):
-    """Base class for per-plant number entities stored in entry.options."""
-
     _attr_mode = NumberMode.SLIDER
     _attr_has_entity_name = True
 
@@ -124,6 +135,7 @@ class PlantCooldownNumber(_BasePlantNumber):
     async def async_set_native_value(self, value: float) -> None:
         await self._set_opt(OPT_COOLDOWN_MIN, value)
 
+
 class PlantStaleAfterNumber(_BasePlantNumber):
     _attr_name = "Stale After"
     _attr_icon = "mdi:timer-alert"
@@ -134,7 +146,6 @@ class PlantStaleAfterNumber(_BasePlantNumber):
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         super().__init__(hass, entry)
-        # ✅ Keep this stable so HA doesn't orphan the entity in the registry
         self._attr_unique_id = f"{entry.entry_id}_stale_after"
 
     @property
@@ -143,3 +154,24 @@ class PlantStaleAfterNumber(_BasePlantNumber):
 
     async def async_set_native_value(self, value: float) -> None:
         await self._set_opt(OPT_STALE_AFTER_MIN, value)
+
+
+class PlantWateringIntervalNumber(_BasePlantNumber):
+    _attr_name = "Watering Interval"
+    _attr_icon = "mdi:calendar-clock"
+    _attr_native_unit_of_measurement = "d"
+    _attr_native_min_value = 1.0
+    _attr_native_max_value = 28.0
+    _attr_native_step = 1.0
+    _attr_mode = NumberMode.BOX  # overrides parent SLIDER
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        super().__init__(hass, entry)
+        self._attr_unique_id = f"{entry.entry_id}_water_interval_days"
+
+    @property
+    def native_value(self) -> float:
+        return self._get_opt(OPT_WATER_INTERVAL_DAYS, DEFAULT_WATER_INTERVAL_DAYS)
+
+    async def async_set_native_value(self, value: float) -> None:
+        await self._set_opt(OPT_WATER_INTERVAL_DAYS, value)
