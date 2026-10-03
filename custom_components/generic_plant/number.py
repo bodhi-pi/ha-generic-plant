@@ -24,6 +24,10 @@ from .const import (
     DEFAULT_COOLDOWN_MIN,
     DEFAULT_STALE_AFTER_MIN,
     DEFAULT_WATER_INTERVAL_DAYS,
+    OPT_RESPONSE_WINDOW_MIN,
+    OPT_RESPONSE_MIN_RISE,
+    DEFAULT_RESPONSE_WINDOW_MIN,
+    DEFAULT_RESPONSE_MIN_RISE,
 )
 
 
@@ -42,6 +46,8 @@ async def async_setup_entry(
 
     if mode == MODE_AUTO:
         entities.append(PlantPumpDurationNumber(hass, entry))
+        entities.append(PlantResponseWindowNumber(hass, entry))
+        entities.append(PlantResponseMinRiseNumber(hass, entry))
 
     if mode == MODE_MANUAL:
         entities.append(PlantWateringIntervalNumber(hass, entry))
@@ -175,3 +181,45 @@ class PlantWateringIntervalNumber(_BasePlantNumber):
 
     async def async_set_native_value(self, value: float) -> None:
         await self._set_opt(OPT_WATER_INTERVAL_DAYS, value)
+
+
+class PlantResponseWindowNumber(_BasePlantNumber):
+    _attr_name = "Response Check Window"
+    _attr_icon = "mdi:timer-sand"
+    _attr_native_unit_of_measurement = "min"
+    _attr_native_min_value = 0.0
+    _attr_native_max_value = 1440.0
+    _attr_native_step = 5.0
+    _attr_mode = NumberMode.BOX
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        super().__init__(hass, entry)
+        self._attr_unique_id = f"{entry.entry_id}_response_window_min"
+
+    @property
+    def native_value(self) -> float:
+        return self._get_opt(OPT_RESPONSE_WINDOW_MIN, DEFAULT_RESPONSE_WINDOW_MIN)
+
+    async def async_set_native_value(self, value: float) -> None:
+        await self._set_opt(OPT_RESPONSE_WINDOW_MIN, value)
+
+
+class PlantResponseMinRiseNumber(_BasePlantNumber):
+    _attr_name = "Response Min Rise"
+    _attr_icon = "mdi:arrow-up-bold-outline"
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_native_min_value = 1.0
+    _attr_native_max_value = 50.0
+    _attr_native_step = 1.0
+    _attr_mode = NumberMode.BOX
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        super().__init__(hass, entry)
+        self._attr_unique_id = f"{entry.entry_id}_response_min_rise"
+
+    @property
+    def native_value(self) -> float:
+        return self._get_opt(OPT_RESPONSE_MIN_RISE, DEFAULT_RESPONSE_MIN_RISE)
+
+    async def async_set_native_value(self, value: float) -> None:
+        await self._set_opt(OPT_RESPONSE_MIN_RISE, value)

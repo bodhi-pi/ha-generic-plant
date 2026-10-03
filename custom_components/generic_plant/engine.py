@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 
@@ -39,9 +41,19 @@ from .const import (
     OPT_LAST_DECISION,
     OPT_WATERING_EVENT,
     OPT_LAST_WATER_NOTIFY,
-
+    DOMAIN,
+    OPT_RESPONSE_WINDOW_MIN,
+    OPT_RESPONSE_MIN_RISE,
+    OPT_LAST_RESPONSE,
+    DEFAULT_RESPONSE_WINDOW_MIN,
+    DEFAULT_RESPONSE_MIN_RISE,
+    RESPONSE_SAMPLE_SECONDS,
+    WATERING_EVENT_HOLD_S,
 )
 from .util import cfg
+from .verify_logic import ResponseCheck, RESULT_TOOK, RESULT_NO_RESPONSE
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
@@ -100,6 +112,22 @@ async def _send_notify(
     )
 
 
+def start_watering_event_spike(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Hold the Watering Event sensor at 100 for the graph marker without blocking the caller."""
+
+    def _set(value: int) -> None:
+        hass.config_entries.async_update_entry(entry, options={**entry.options, OPT_WATERING_EVENT: value})
+
+    async def _spike() -> None:
+        _set(100)
+        try:
+            await asyncio.sleep(WATERING_EVENT_HOLD_S)
+        finally:
+            _set(0)
+
+    entry.async_create_background_task(hass, _spike(), f"{DOMAIN}_watering_event_{entry.entry_id}")
+
+
 # --------------------------
 # Engine
 # --------------------------
@@ -110,6 +138,9 @@ class PlantEngine:
         self.entry = entry
         self._unsub_timer = None
         self._lock = asyncio.Lock()
+        self._check: ResponseCheck | None = None
+        self._check_ctx: dict = {}
+        self._unsub_check = None
 
     # ---- lifecycle ----
     def start(self, interval: timedelta) -> None:
@@ -121,10 +152,30 @@ class PlantEngine:
         if self._unsub_timer is not None:
             self._unsub_timer()
             self._unsub_timer = None
+        self._stop_check()
 
     async def _tick(self, now) -> None:
+        await self.evaluate_now()
+
+    async def evaluate_now(self) -> WaterResult:
         async with self._lock:
-            await self.evaluate_and_water()
+            return await self.evaluate_and_water()
+
+    async def water_now(self) -> WaterResult:
+        """Manual pump run (Water Now button): skips threshold and cooldown, still response-checked."""
+        async with self._lock:
+            pump_switch = cfg(self.entry, CONF_PUMP_SWITCH)
+            if not pump_switch:
+                self._set_decision("skipped_no_pump_switch")
+                return WaterResult(ran=False, confirmed_on=False)
+            duration_s = int(self.entry.options.get(OPT_PUMP_DURATION_S, DEFAULT_PUMP_DURATION_S))
+            return await self._run_pump(
+                plant_name=self.entry.data.get(CONF_PLANT_NAME, "Plant"),
+                pump_switch=pump_switch,
+                duration_s=duration_s,
+                moisture=self._get_float_state(cfg(self.entry, CONF_MOISTURE_ENTITY)),
+                threshold=None,
+            )
 
     # ---- option helpers ----
     def _update_options(self, **updates) -> None:
@@ -138,12 +189,6 @@ class PlantEngine:
 
     def _touch_evaluated(self) -> None:
         self._update_options(**{OPT_LAST_EVALUATED: _now_iso()})
-
-    async def _spike_watering_event(self) -> None:
-        """Write 100 then 0 with a short delay so recorder captures both states."""
-        self._update_options(**{OPT_WATERING_EVENT: 100})
-        await asyncio.sleep(5400)  # 90 minutes — ensures capture at 2 points/hour sampling
-        self._update_options(**{OPT_WATERING_EVENT: 0})
 
     # ---- state helpers ----
     def _mode(self) -> str:
@@ -346,55 +391,61 @@ class PlantEngine:
 
         return WaterResult(ran=False, confirmed_on=False)
 
-    # ---- pump execution (auto mode only) ----
+    # ---- pump execution ----
     async def _run_pump(
         self,
         *,
         plant_name: str,
         pump_switch: str,
         duration_s: int,
-        moisture: float,
-        threshold: float,
+        moisture: float | None,
+        threshold: float | None,
     ) -> WaterResult:
-        await self.hass.services.async_call(
-            "switch", "turn_on", {"entity_id": pump_switch}, blocking=True
-        )
+        confirmed = False
+        try:
+            await self.hass.services.async_call(
+                "switch", "turn_on", {"entity_id": pump_switch}, blocking=True
+            )
 
-        confirmed = await self._wait_for_state(pump_switch, "on", timeout_s=5)
+            confirmed = await self._wait_for_state(pump_switch, "on", timeout_s=5)
 
-        if not confirmed:
-            self._set_decision("failed_pump_confirm_on")
-            if bool(self.entry.options.get(OPT_NOTIFY_ON_FAILURE, False)):
-                if not _should_throttle(self.entry, OPT_LAST_FAILURE_NOTIFY, minutes=60):
+            if not confirmed:
+                self._set_decision("failed_pump_confirm_on")
+                if bool(self.entry.options.get(OPT_NOTIFY_ON_FAILURE, False)):
+                    if not _should_throttle(self.entry, OPT_LAST_FAILURE_NOTIFY, minutes=60):
+                        await _send_notify(
+                            self.hass,
+                            self.entry,
+                            enabled_key=OPT_NOTIFY_ON_FAILURE,
+                            title=f"🌱 {plant_name} watering failed",
+                            message="Pump did not confirm ON. No last-watered timestamp was written.",
+                        )
+                        self._update_options(**{OPT_LAST_FAILURE_NOTIFY: _now_iso()})
+            else:
+                self._update_options(**{OPT_LAST_WATERED: _now_iso()})
+                self._set_decision("watered")
+                start_watering_event_spike(self.hass, self.entry)
+
+                if self._response_window_min() > 0 and moisture is not None:
+                    self._start_check(baseline=moisture, duration_s=duration_s)
+                else:
+                    lines = [f"Moisture: {moisture:.1f}%" if moisture is not None else "Moisture: unknown"]
+                    if threshold is not None:
+                        lines.append(f"Threshold: {threshold:.1f}%")
+                    lines.append(f"Duration: {int(duration_s)}s")
                     await _send_notify(
                         self.hass,
                         self.entry,
-                        enabled_key=OPT_NOTIFY_ON_FAILURE,
-                        title=f"🌱 {plant_name} watering failed",
-                        message="Pump did not confirm ON. No last-watered timestamp was written.",
+                        enabled_key=OPT_NOTIFY_ON_WATER,
+                        title=f"🌱 {plant_name} watered",
+                        message="\n".join(lines),
                     )
-                    self._update_options(**{OPT_LAST_FAILURE_NOTIFY: _now_iso()})
 
-        if confirmed:
-            self._update_options(**{OPT_LAST_WATERED: _now_iso()})
-            self._set_decision("watered")
-            await self._spike_watering_event()
-            await _send_notify(
-                self.hass,
-                self.entry,
-                enabled_key=OPT_NOTIFY_ON_WATER,
-                title=f"🌱 {plant_name} watered",
-                message=(
-                    f"Moisture: {moisture:.1f}%\n"
-                    f"Threshold: {threshold:.1f}%\n"
-                    f"Duration: {int(duration_s)}s"
-                ),
+            await asyncio.sleep(max(1, int(duration_s)))
+        finally:
+            await self.hass.services.async_call(
+                "switch", "turn_off", {"entity_id": pump_switch}, blocking=True
             )
-
-        await asyncio.sleep(max(1, int(duration_s)))
-        await self.hass.services.async_call(
-            "switch", "turn_off", {"entity_id": pump_switch}, blocking=True
-        )
 
         return WaterResult(ran=True, confirmed_on=confirmed)
 
@@ -409,3 +460,91 @@ class PlantEngine:
             if st and st.state == desired:
                 return True
         return False
+
+    # ---- post-watering response check ----
+    def _response_window_min(self) -> int:
+        try:
+            return max(0, int(float(self.entry.options.get(OPT_RESPONSE_WINDOW_MIN, DEFAULT_RESPONSE_WINDOW_MIN))))
+        except (TypeError, ValueError):
+            return 0
+
+    def _response_min_rise(self) -> float:
+        try:
+            return float(self.entry.options.get(OPT_RESPONSE_MIN_RISE, DEFAULT_RESPONSE_MIN_RISE))
+        except (TypeError, ValueError):
+            return DEFAULT_RESPONSE_MIN_RISE
+
+    def _start_check(self, *, baseline: float, duration_s: int) -> None:
+        self._stop_check()
+        now = time.time()
+        self._check = ResponseCheck(
+            started=now,
+            window_end=now + self._response_window_min() * 60,
+            baseline=baseline,
+        )
+        self._check_ctx = {"duration_s": int(duration_s)}
+        self._unsub_check = async_track_time_interval(
+            self.hass, self._check_tick, timedelta(seconds=RESPONSE_SAMPLE_SECONDS)
+        )
+
+    def _stop_check(self) -> None:
+        if self._unsub_check is not None:
+            self._unsub_check()
+            self._unsub_check = None
+        self._check = None
+
+    async def _check_tick(self, now) -> None:
+        check = self._check
+        if check is None:
+            self._stop_check()
+            return
+
+        last_seen = self._get_last_seen()
+        fresh = last_seen is not None and last_seen.timestamp() > check.started
+        check.add_sample(self._get_float_state(cfg(self.entry, CONF_MOISTURE_ENTITY)), fresh=fresh)
+
+        result = check.evaluate(time.time(), self._response_min_rise())
+        if result is None:
+            return
+
+        duration_s = self._check_ctx.get("duration_s")
+        self._stop_check()
+        await self._report_check(check, result, duration_s)
+
+    async def _report_check(self, check: ResponseCheck, result: str, duration_s: int | None) -> None:
+        plant_name = self.entry.data.get(CONF_PLANT_NAME, "Plant")
+        rise = check.rise
+        self._update_options(
+            **{
+                OPT_LAST_RESPONSE: {
+                    "result": result,
+                    "rise": rise,
+                    "baseline": check.baseline,
+                    "peak": check.sustained_peak,
+                    "started": datetime.fromtimestamp(check.started, timezone.utc).isoformat(),
+                    "finished": _now_iso(),
+                }
+            }
+        )
+        _LOGGER.info("%s watering response: %s (baseline=%s peak=%s)", plant_name, result, check.baseline, check.sustained_peak)
+
+        if result == RESULT_TOOK:
+            await _send_notify(
+                self.hass,
+                self.entry,
+                enabled_key=OPT_NOTIFY_ON_WATER,
+                title=f"🌱 {plant_name} watered",
+                message=f"Moisture {check.baseline:.0f}% → {check.sustained_peak:.0f}% (+{rise:.0f})",
+            )
+        elif result == RESULT_NO_RESPONSE:
+            ran = f" after the pump ran {duration_s}s" if duration_s else ""
+            await _send_notify(
+                self.hass,
+                self.entry,
+                enabled_key=OPT_NOTIFY_ON_FAILURE,
+                title=f"⚠️ {plant_name} didn't take water",
+                message=(
+                    f"Moisture stayed at {check.baseline:.0f}%{ran}. "
+                    "Check the reservoir. It will try again after the cooldown."
+                ),
+            )

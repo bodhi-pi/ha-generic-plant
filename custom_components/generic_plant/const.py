@@ -49,3 +49,13 @@ DEFAULT_WATER_INTERVAL_DAYS = 7  # NEW
 # MQTT heartbeat
 OPT_HEARTBEAT_TOPIC = "heartbeat_topic"
 OPT_LAST_SEEN = "last_seen"
+
+# Post-watering response check (auto mode). Window 0 disables it.
+OPT_RESPONSE_WINDOW_MIN = "response_window_min"
+OPT_RESPONSE_MIN_RISE = "response_min_rise"
+OPT_LAST_RESPONSE = "last_response"
+DEFAULT_RESPONSE_WINDOW_MIN = 0
+DEFAULT_RESPONSE_MIN_RISE = 3.0
+RESPONSE_SAMPLE_SECONDS = 60
+
+WATERING_EVENT_HOLD_S = 5400

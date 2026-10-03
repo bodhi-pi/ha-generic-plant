@@ -28,6 +28,7 @@ from .const import (
     OPT_LAST_EVALUATED,
     OPT_LAST_DECISION,
     OPT_WATERING_EVENT,
+    OPT_LAST_RESPONSE,
 )
 
 from .util import cfg
@@ -62,6 +63,9 @@ async def async_setup_entry(
         last_seen = PlantLastSeenSensor(hass, entry, runtime)
 
         entities += [moisture, last_seen]
+
+        if mode == MODE_AUTO:
+            entities.append(PlantLastWateringResultSensor(hass, entry))
 
         # Register sensor manager for reconfiguration on options changes
         runtime_dict = hass.data.get(DOMAIN, {}).get(entry.entry_id)
@@ -292,3 +296,24 @@ class PlantWateringEventSensor(_BasePlantSensor):
     @property
     def native_value(self) -> float:
         return float(self.entry.options.get(OPT_WATERING_EVENT, 0))
+
+
+class PlantLastWateringResultSensor(_BasePlantSensor):
+    """Did the most recent checked pump run raise moisture? took / no_response / unknown."""
+
+    _attr_icon = "mdi:water-check-outline"
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        super().__init__(hass, entry)
+        self._attr_name = "Last Watering Result"
+        self._attr_unique_id = f"{entry.entry_id}_last_watering_result"
+
+    @property
+    def native_value(self) -> str | None:
+        last = self.entry.options.get(OPT_LAST_RESPONSE)
+        return last.get("result") if isinstance(last, dict) else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        last = self.entry.options.get(OPT_LAST_RESPONSE)
+        return dict(last) if isinstance(last, dict) else {}
